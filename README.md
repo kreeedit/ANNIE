@@ -149,4 +149,4 @@ ANNIE saves annotations in JSON format:
 
 ## License
 
-This software is provided as-is under the MIT License.
+Apache 2.0
