@@ -36,6 +36,10 @@ ANNIE is a lightweight desktop application that provides a user-friendly interfa
 python annie.py
 ```
 
+<p align="center">
+  <img src="annie_app.png" width="800" />
+</p>
+
 ## Basic Usage
 
 ### 1. Loading Files
