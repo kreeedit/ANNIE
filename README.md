@@ -2,6 +2,10 @@
 
 ANNIE is a lightweight desktop application that provides a user-friendly interface for annotating text files with entities and relations. It's designed to help researchers, linguists, and NLP practitioners create high-quality annotated datasets for named entity recognition (NER) and relation extraction tasks.
 
+<p align="center">
+  <img src="annie.gif" width="400" />
+</p>
+
 ## Features
 
 - **Text Annotation**: Mark spans of text as entities with custom tags (Person, Organization, Location, etc.)
