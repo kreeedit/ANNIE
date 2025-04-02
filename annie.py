@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 """
 ANNIE: Annotation Interface for Named-entity & Information Extraction.
 Allows loading text files, annotating text spans (entities) with tags,
 and annotating directed relations between entities.
 Includes basic propagation for entities and management for tags/relation types.
 Adds dictionary-based entity propagation, relation flipping, and entity merging.
+Includes Save/Load Session functionality.
 """
 
 import os
@@ -14,6 +16,9 @@ from pathlib import Path
 import uuid  # For unique IDs
 import itertools # For cycling through colors
 import re # For word boundary checking if needed
+
+# --- Constants ---
+SESSION_FILE_VERSION = "1.1" # Increment if session format changes significantly
 
 class TextAnnotator:
     """
@@ -26,17 +31,17 @@ class TextAnnotator:
         Sets up variables, colors, and builds the UI.
         """
         self.root = root_window
-        self.root.title("ANNIE - Annotation Interface for Named-entity & Information Extraction")
-        # Increased size to better accommodate all elements
+        self.root.title("ANNIE - Annotation Interface") # Shortened title
         self.root.geometry("1200x850")
 
         # --- Core Data ---
         self.current_file_path = None
-        self.files_list = []
+        self.files_list = [] # List of *full paths* to text files
         self.current_file_index = -1
         # Main annotation data structure:
         # { "full/path/to/file.txt": {"entities": [entity_dict,...], "relations": [relation_dict,...]}, ... }
         self.annotations = {}
+        self.session_save_path = None # Track the path of the last saved/loaded session
 
         # --- Entity Tagging Configuration ---
         self.entity_tags = ["Person", "Organization", "Location", "Date", "Other"]
@@ -44,44 +49,49 @@ class TextAnnotator:
         self.extend_to_word = tk.BooleanVar(value=False) # For entity propagation
 
         # --- Relation Tagging Configuration ---
-        # Example relations, can be managed via Settings menu
         self.relation_types = ["spouse_of", "works_at", "located_in", "born_on", "produces"]
         self.selected_relation_type = tk.StringVar(value=self.relation_types[0] if self.relation_types else "")
 
         # --- UI State ---
-        # Stores UUIDs of entities selected in the entities_tree, used for creating relations
-        self.selected_entity_ids_for_relation = []
+        self.selected_entity_ids_for_relation = [] # Stores UUIDs from entities_tree
 
         # --- Colors ---
-        # Predefined colors for common tags
-        self.tag_colors = {
+        self.tag_colors = { # Default colors
             "Person": "#ffcccc", "Organization": "#ccffcc", "Location": "#ccccff",
             "Date": "#ffffcc", "Other": "#ccffff"
         }
-        # Fallback colors for new tags added via settings, cycles through this list
-        self.color_cycle = itertools.cycle([
+        self.color_cycle = itertools.cycle([ # Fallback colors
             "#e6e6fa", "#ffe4e1", "#f0fff0", "#fffacd", "#add8e6",
             "#f5f5dc", "#d3ffd3", "#fafad2", "#ffebcd", "#e0ffff"
         ])
+        self._ensure_default_colors() # Ensure default tags have colors assigned
 
         # --- Build UI ---
         self.create_menu()
-        self.create_layout() # Call the corrected layout function
+        self.create_layout()
 
         # --- Status Bar ---
-        self.status_var = tk.StringVar(value="Ready. Open a directory to start.")
+        self.status_var = tk.StringVar(value="Ready. Open a directory or load a session.")
         self.status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         # --- Initial UI Setup ---
         self._update_entity_tag_combobox()
         self._update_relation_type_combobox()
-        self._configure_text_tags() # Apply initial tag colors
-        self._configure_treeview_tags() # Configure treeview tags (e.g., for merging)
-        self._update_button_states() # Set initial button enable/disable state
+        self._configure_text_tags()
+        self._configure_treeview_tags()
+        self._update_button_states()
+
+        # --- Add protocol for closing window ---
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
 
-    # --- Menu Creation ---
+    def _ensure_default_colors(self):
+        """Ensure all predefined entity tags have a color assigned."""
+        for tag in self.entity_tags:
+            self.get_color_for_tag(tag) # This will assign a color if missing
+
+
     def create_menu(self):
         """Creates the main application menu bar."""
         menubar = tk.Menu(self.root)
@@ -89,25 +99,29 @@ class TextAnnotator:
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open Directory", command=self.load_directory)
-        # Placeholder for Load Annotations feature
-        # file_menu.add_command(label="Load Annotations", command=self.load_annotations_from_file) # To be implemented
-        file_menu.add_command(label="Save Annotations", command=self.save_annotations)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
+        # --- NEW: Session Save/Load ---
+        file_menu.add_command(label="Load Session...", command=self.load_session)
+        file_menu.add_command(label="Save Session", command=self.save_session)
+        file_menu.add_command(label="Save Session As...", command=lambda: self.save_session(force_ask=True)) # Force save dialog
+        file_menu.add_separator()
+        # --- End New ---
+        file_menu.add_command(label="Save Annotations Only...", command=self.save_annotations) # Renamed for clarity
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_closing) # Use closing handler
         menubar.add_cascade(label="File", menu=file_menu)
 
         # Settings menu
         settings_menu = tk.Menu(menubar, tearoff=0)
-        settings_menu.add_command(label="Manage Entity Tags", command=self.manage_entity_tags)
-        settings_menu.add_command(label="Manage Relation Types", command=self.manage_relation_types)
-        settings_menu.add_separator() # Separator before the new option
-        settings_menu.add_command(label="Load Dictionary & Propagate Entities", command=self.load_and_propagate_from_dictionary)
+        settings_menu.add_command(label="Manage Entity Tags...", command=self.manage_entity_tags)
+        settings_menu.add_command(label="Manage Relation Types...", command=self.manage_relation_types)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         self.root.config(menu=menubar)
 
-
-    # --- UI Layout Creation ---
+    # --- UI Layout Creation (Unchanged from original, except potentially minor adjustments) ---
     def create_layout(self):
         """Creates the main GUI layout with all widgets."""
         # Main frame
@@ -168,7 +182,6 @@ class TextAnnotator:
 
         # Entity Controls Frame
         entity_controls_frame = tk.LabelFrame(controls_panel, text="Entity Annotation", padx=5, pady=5)
-        # Adjusted packing for potentially more buttons
         entity_controls_frame.pack(side=tk.LEFT, padx=(5, 5), pady=5, fill=tk.X, expand=True)
 
         ecf_top = tk.Frame(entity_controls_frame)
@@ -180,7 +193,6 @@ class TextAnnotator:
         self.annotate_btn.pack(side=tk.LEFT, padx=5)
         self.remove_entity_btn = tk.Button(ecf_top, text="Remove", command=self.remove_entity_annotation, state=tk.DISABLED, width=8)
         self.remove_entity_btn.pack(side=tk.LEFT, padx=5)
-        # <<< NEW MERGE BUTTON >>>
         self.merge_entities_btn = tk.Button(ecf_top, text="Merge Sel.", command=self.merge_selected_entities, state=tk.DISABLED, width=10)
         self.merge_entities_btn.pack(side=tk.LEFT, padx=5)
 
@@ -194,21 +206,19 @@ class TextAnnotator:
 
         # Relation Controls Frame
         relation_controls_frame = tk.LabelFrame(controls_panel, text="Relation Annotation", padx=5, pady=5)
-        # Adjusted packing for potentially more buttons
         relation_controls_frame.pack(side=tk.LEFT, padx=(0, 5), pady=5, fill=tk.X, expand=True)
 
         tk.Label(relation_controls_frame, text="Type:").pack(side=tk.LEFT)
         self.relation_type_combobox = ttk.Combobox(relation_controls_frame, textvariable=self.selected_relation_type, values=self.relation_types, width=12, state="readonly")
         self.relation_type_combobox.pack(side=tk.LEFT, padx=5)
-        self.add_relation_btn = tk.Button(relation_controls_frame, text="Add Relation (Head->Tail)", command=self.add_relation, state=tk.DISABLED, width=20) # Slightly reduced width
-        self.add_relation_btn.pack(side=tk.LEFT, padx=(5, 2)) # Reduced right padx
+        self.add_relation_btn = tk.Button(relation_controls_frame, text="Add Relation (Head->Tail)", command=self.add_relation, state=tk.DISABLED, width=20)
+        self.add_relation_btn.pack(side=tk.LEFT, padx=(5, 2))
 
-        # <<< NEW FLIP BUTTON >>>
         self.flip_relation_btn = tk.Button(relation_controls_frame, text="Flip H/T", command=self.flip_selected_relation, state=tk.DISABLED, width=7)
-        self.flip_relation_btn.pack(side=tk.LEFT, padx=2) # Added padding
+        self.flip_relation_btn.pack(side=tk.LEFT, padx=2)
 
-        self.remove_relation_btn = tk.Button(relation_controls_frame, text="Remove Relation", command=self.remove_relation_annotation, state=tk.DISABLED, width=14) # Slightly reduced width
-        self.remove_relation_btn.pack(side=tk.LEFT, padx=(2, 5)) # Reduced left padx
+        self.remove_relation_btn = tk.Button(relation_controls_frame, text="Remove Relation", command=self.remove_relation_annotation, state=tk.DISABLED, width=14)
+        self.remove_relation_btn.pack(side=tk.LEFT, padx=(2, 5))
 
 
         # --- Pane 3: Annotation Lists (Entities & Relations) ---
@@ -229,8 +239,7 @@ class TextAnnotator:
             displaycolumns=("Start", "End", "Text", "Tag"), show="headings",
             yscrollcommand=scrollbar_entities_y.set, selectmode='extended'
         )
-        # Explicitly defining the 'ID' column, even though not displayed by default, is needed for iid mapping
-        self.entities_tree.column("ID", width=0, stretch=False) # Hide the ID column itself
+        self.entities_tree.column("ID", width=0, stretch=False) # Hide ID column
         self.entities_tree.heading("Start", text="Start")
         self.entities_tree.heading("End", text="End")
         self.entities_tree.heading("Text", text="Text")
@@ -253,7 +262,7 @@ class TextAnnotator:
         self.relations_tree = ttk.Treeview(
             relations_tree_frame, columns=("ID", "Head", "Type", "Tail"),
             displaycolumns=("Head", "Type", "Tail"), show="headings",
-            yscrollcommand=scrollbar_relations_y.set, selectmode='browse' # Keep browse (single select)
+            yscrollcommand=scrollbar_relations_y.set, selectmode='browse'
         )
         self.relations_tree.column("ID", width=0, stretch=False) # Hide ID column
         self.relations_tree.heading("Head", text="Head Entity")
@@ -266,102 +275,98 @@ class TextAnnotator:
         self.relations_tree.bind("<<TreeviewSelect>>", self.on_relation_select)
         scrollbar_relations_y.config(command=self.relations_tree.yview)
 
-
-    # --- Color and Tag Configuration ---
+    # --- Color and Tag Configuration (Unchanged) ---
     def get_color_for_tag(self, tag):
         """Gets a color for a tag, generating one if not predefined."""
         if tag not in self.tag_colors:
             try:
-                self.tag_colors[tag] = next(self.color_cycle)
+                # Ensure the tag exists in the official list before assigning color
+                if tag in self.entity_tags:
+                     self.tag_colors[tag] = next(self.color_cycle)
+                else:
+                     # Handle case where tag might be requested but not officially managed (e.g., old data)
+                     return "#cccccc" # Default grey
             except Exception:
-                # Fallback if cycle fails somehow
-                self.tag_colors[tag] = "#cccccc"
-        return self.tag_colors.get(tag, "#cccccc") # Default grey if tag somehow not found
+                self.tag_colors[tag] = "#cccccc" # Fallback if cycle fails
+        return self.tag_colors.get(tag, "#cccccc") # Default grey if lookup fails
 
     def _configure_text_tags(self):
         """Configures background colors for all known entity tags in the text area."""
         for tag in self.entity_tags:
             color = self.get_color_for_tag(tag)
             try:
-                # Ensure tag exists before configuring
                 self.text_area.tag_configure(tag, background=color)
             except tk.TclError as e:
                 print(f"Warning: Could not configure text tag '{tag}': {e}")
 
-    # <<< NEW METHOD >>>
     def _configure_treeview_tags(self):
         """Configures tags for styling the Treeview items (e.g., for merged entities)."""
         try:
-            # Style for entities that have been merged (share an ID with others)
             self.entities_tree.tag_configure(
                 'merged',
                 foreground='grey',
-                font=('TkDefaultFont', 9, 'italic') # Adjust font size/style as needed
+                font=('TkDefaultFont', 9, 'italic')
             )
-            # Add more tags here if needed in the future
         except tk.TclError as e:
             print(f"Warning: Could not configure Treeview tags: {e}")
 
     def _update_entity_tag_combobox(self):
         """Updates the values and state of the entity tag combobox."""
-        self.entity_tag_combobox['values'] = self.entity_tags
+        # Safe access to selected tag even if list is modified
         current_selection = self.selected_entity_tag.get()
         if not self.entity_tags:
             self.selected_entity_tag.set("")
-            self.entity_tag_combobox.config(state=tk.DISABLED)
-        # Set to first tag if current selection invalid OR if combobox is currently disabled
-        elif current_selection not in self.entity_tags or self.entity_tag_combobox['state'] == tk.DISABLED:
-            self.selected_entity_tag.set(self.entity_tags[0])
-            self.entity_tag_combobox.config(state="readonly") # Ensure it's re-enabled
+            self.entity_tag_combobox.config(values=[], state=tk.DISABLED)
         else:
-             # If selection is valid and combobox already enabled, just ensure it's readonly
-             self.entity_tag_combobox.config(state="readonly")
-
+            self.entity_tag_combobox['values'] = self.entity_tags
+            # If current selection is no longer valid or combobox was disabled, set to first
+            if current_selection not in self.entity_tags or self.entity_tag_combobox['state'] == tk.DISABLED:
+                self.selected_entity_tag.set(self.entity_tags[0])
+            else:
+                 # Ensure current selection remains if still valid
+                 self.selected_entity_tag.set(current_selection)
+            self.entity_tag_combobox.config(state="readonly")
 
     def _update_relation_type_combobox(self):
         """Updates the values and state of the relation type combobox."""
-        self.relation_type_combobox['values'] = self.relation_types
         current_selection = self.selected_relation_type.get()
         if not self.relation_types:
             self.selected_relation_type.set("")
-            self.relation_type_combobox.config(state=tk.DISABLED)
-        elif current_selection not in self.relation_types or self.relation_type_combobox['state'] == tk.DISABLED:
-            self.selected_relation_type.set(self.relation_types[0])
-            self.relation_type_combobox.config(state="readonly")
+            self.relation_type_combobox.config(values=[], state=tk.DISABLED)
         else:
-             self.relation_type_combobox.config(state="readonly")
+            self.relation_type_combobox['values'] = self.relation_types
+            if current_selection not in self.relation_types or self.relation_type_combobox['state'] == tk.DISABLED:
+                self.selected_relation_type.set(self.relation_types[0])
+            else:
+                self.selected_relation_type.set(current_selection)
+            self.relation_type_combobox.config(state="readonly")
 
-    # --- Button State Management ---
+    # --- Button State Management (Unchanged) ---
     def _update_button_states(self):
         """Enable/disable buttons based on current application state."""
         file_loaded = bool(self.current_file_path)
         has_files = bool(self.files_list)
         num_entities_selected = len(self.entities_tree.selection())
-        num_relations_selected = len(self.relations_tree.selection()) # Get count of selected relations
+        num_relations_selected = len(self.relations_tree.selection())
 
         # File Navigation
         self.prev_btn.config(state=tk.NORMAL if has_files and self.current_file_index > 0 else tk.DISABLED)
         self.next_btn.config(state=tk.NORMAL if has_files and self.current_file_index < len(self.files_list) - 1 else tk.DISABLED)
 
         # Text Area
-        # Enable text area only if a file is loaded. Use 'normal' state for editing.
         self.text_area.config(state=tk.NORMAL if file_loaded else tk.DISABLED)
 
         # Entity Buttons
-        self.annotate_btn.config(state=tk.NORMAL if file_loaded and self.entity_tags else tk.DISABLED)
+        can_annotate_entity = file_loaded and self.entity_tags
+        self.annotate_btn.config(state=tk.NORMAL if can_annotate_entity else tk.DISABLED)
         self.remove_entity_btn.config(state=tk.NORMAL if num_entities_selected > 0 else tk.DISABLED)
-        # <<< UPDATE MERGE BUTTON STATE >>>
-        self.merge_entities_btn.config(state=tk.NORMAL if num_entities_selected >= 2 else tk.DISABLED) # Enable if 2 or more are selected
+        self.merge_entities_btn.config(state=tk.NORMAL if num_entities_selected >= 2 else tk.DISABLED)
         can_propagate_current = file_loaded and self.annotations.get(self.current_file_path, {}).get("entities")
         self.propagate_btn.config(state=tk.NORMAL if can_propagate_current else tk.DISABLED)
-
 
         # Relation Buttons
         can_add_relation = num_entities_selected == 2 and self.relation_types
         self.add_relation_btn.config(state=tk.NORMAL if can_add_relation else tk.DISABLED)
-
-        # <<< UPDATE FLIP/REMOVE BUTTON STATES >>>
-        # Enable Flip and Remove only if *exactly one* relation is selected
         can_modify_relation = num_relations_selected == 1
         self.flip_relation_btn.config(state=tk.NORMAL if can_modify_relation else tk.DISABLED)
         self.remove_relation_btn.config(state=tk.NORMAL if can_modify_relation else tk.DISABLED)
@@ -370,35 +375,47 @@ class TextAnnotator:
     # --- File Handling ---
     def load_directory(self):
         """Opens a directory, lists .txt files, and loads the first one."""
+        # --- Check for unsaved changes before discarding current state ---
+        if self._has_unsaved_changes():
+             if not messagebox.askyesno("Unsaved Changes", "You have unsaved changes in the current session.\nDiscard changes and load new directory?", parent=self.root):
+                 return # User cancelled
+
         directory = filedialog.askdirectory(title="Select Directory with Text Files")
         if directory:
-            self.files_list = []
-            self.files_listbox.delete(0, tk.END)
-            self.annotations = {} # Clear all annotations when loading new directory
-            self.current_file_path = None
-            self.current_file_index = -1
-            self.clear_views() # Clear UI elements
-
+            new_files_list = []
             try:
-                # Use Path for potentially better cross-platform handling if needed
-                # p = Path(directory)
-                # self.files_list = sorted([str(f) for f in p.glob('*.txt')])
-                # Or stick to os for simplicity:
+                # Scan for .txt files
                 for filename in sorted(os.listdir(directory)):
                     if filename.lower().endswith(".txt"):
                         full_path = os.path.join(directory, filename)
-                        self.files_list.append(full_path)
-                        self.files_listbox.insert(tk.END, filename) # Display only filename
-            except OSError as e:
-                 messagebox.showerror("Error Loading Directory", f"Could not read directory contents:\n{e}")
-                 return # Stop if directory cannot be read
+                        # Basic check if it's actually a file (not a dir named .txt)
+                        if os.path.isfile(full_path):
+                            new_files_list.append(full_path)
 
-            if self.files_list:
+            except OSError as e:
+                messagebox.showerror("Error Loading Directory", f"Could not read directory contents:\n{e}")
+                return # Stop if directory cannot be read
+
+            if new_files_list:
+                # Reset application state *after* successfully scanning
+                self._reset_state() # Clear annotations, paths, etc.
+                self.files_list = new_files_list
+                self.session_save_path = None # New directory means it's not the previously saved session
+
+                # Populate the listbox
+                self.files_listbox.delete(0, tk.END)
+                for file_path in self.files_list:
+                    self.files_listbox.insert(tk.END, os.path.basename(file_path))
+
                 self.load_file(0) # Load the first file
                 self.status_var.set(f"Loaded {len(self.files_list)} files from '{os.path.basename(directory)}'")
+                # Set title to reflect directory
+                self.root.title(f"ANNIE - {os.path.basename(directory)}")
             else:
+                # If no text files found, don't reset the state, just inform the user
                 self.status_var.set(f"No .txt files found in '{os.path.basename(directory)}'")
-            self._update_button_states() # Update buttons after loading
+
+            self._update_button_states()
 
     def load_file(self, index):
         """Loads the content and annotations for the file at the given index."""
@@ -406,8 +423,16 @@ class TextAnnotator:
             print(f"Warning: Invalid file index {index} requested.")
             return
 
-        # Clear previous file's state before loading new one
-        self.clear_views()
+        # Check if index is actually changing
+        if index == self.current_file_index and self.current_file_path:
+            # No need to reload if it's the same file unless forced
+            # print("Debug: Same file index selected, no reload.")
+            return
+
+        # --- No need to check for unsaved changes here, as switching files within a session is expected ---
+
+        # Clear views *before* loading new content
+        self.clear_views() # Clears text, treeviews, selection state
 
         self.current_file_index = index
         self.current_file_path = self.files_list[index]
@@ -416,6 +441,7 @@ class TextAnnotator:
         # Update listbox selection visually
         self.files_listbox.selection_clear(0, tk.END)
         self.files_listbox.selection_set(index)
+        self.files_listbox.activate(index) # Visually indicates the active item
         self.files_listbox.see(index) # Ensure selected item is visible
 
         # Load file content
@@ -423,32 +449,28 @@ class TextAnnotator:
         self.text_area.delete(1.0, tk.END)
         file_loaded_successfully = False
         try:
-            # Always use utf-8 for broader compatibility
             with open(self.current_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
                 self.text_area.insert(tk.END, content)
             file_loaded_successfully = True
         except Exception as e:
             messagebox.showerror("Error Reading File", f"Failed to load file '{filename}':\n{str(e)}")
-            self.text_area.config(state=tk.DISABLED) # Disable text area on error
-            self.current_file_path = None # Reset state
-            self.current_file_index = -1
+            self.text_area.config(state=tk.DISABLED)
+            # Consider how to handle state: maybe clear current file info?
+            # self.current_file_path = None
+            # self.current_file_index = -1 # This might jump the user around undesirably
             self.status_var.set(f"Error loading {filename}")
             file_loaded_successfully = False
-            # Update buttons before returning
-            self._update_button_states()
-            return # Stop processing this file
 
         # If loaded successfully, load/apply annotations
         if file_loaded_successfully:
-            # Ensure annotations structure exists for this file
+            # Ensure annotations structure exists for this file (might be newly loaded)
             file_data = self.annotations.setdefault(self.current_file_path, {"entities": [], "relations": []})
-            # Ensure lists exist within the structure
             file_data.setdefault("entities", [])
             file_data.setdefault("relations", [])
 
             # Populate UI lists and apply highlighting
-            self.update_entities_list()
+            self.update_entities_list() # Must happen before relation list if using entity text map
             self.update_relations_list()
             self.apply_annotations_to_text() # Highlight entities in text
 
@@ -456,45 +478,51 @@ class TextAnnotator:
 
             # Reset undo stack for the new file
             self.text_area.edit_reset()
-            # Keep text area editable after loading
-            self.text_area.config(state=tk.NORMAL)
+            self.text_area.config(state=tk.NORMAL) # Ensure editable
 
         # Always update button states after load attempt
         self._update_button_states()
 
-
     def clear_views(self):
         """Clears text area content, highlights, and annotation list Treeviews."""
-        # Store original state to restore later if needed
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL) # Enable to modify
         self.text_area.delete(1.0, tk.END)
         # Remove all known entity tag highlights
         for tag in self.entity_tags:
             try:
-                 self.text_area.tag_remove(tag, "1.0", tk.END)
-            except tk.TclError:
-                 pass # Ignore if tag doesn't exist or causes error
+                self.text_area.tag_remove(tag, "1.0", tk.END)
+            except tk.TclError: pass # Ignore if tag doesn't exist
         # Remove selection highlight
         try:
-             self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-        except tk.TclError:
-             pass
+            self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
+        except tk.TclError: pass
+
         # Restore original state (usually DISABLED if no file was loaded, NORMAL if file was loaded)
         self.text_area.config(state=original_state if self.current_file_path else tk.DISABLED)
 
         # Clear Treeviews safely
-        try:
-             self.entities_tree.delete(*self.entities_tree.get_children())
-        except Exception as e:
-             print(f"Info: Error clearing entities tree (might be empty): {e}")
-        try:
-             self.relations_tree.delete(*self.relations_tree.get_children())
-        except Exception as e:
-             print(f"Info: Error clearing relations tree (might be empty): {e}")
+        try: self.entities_tree.delete(*self.entities_tree.get_children())
+        except Exception: pass
+        try: self.relations_tree.delete(*self.relations_tree.get_children())
+        except Exception: pass
 
         # Reset selection state variable used for relations
         self.selected_entity_ids_for_relation = []
+
+
+    def _reset_state(self):
+        """Resets the core application state (files, annotations, current index)."""
+        self.clear_views() # Clear UI elements first
+        self.current_file_path = None
+        self.files_list = []
+        self.files_listbox.delete(0, tk.END)
+        self.current_file_index = -1
+        self.annotations = {}
+        # Keep entity tags, relation types, colors as they are user settings, not session-specific unless loaded
+        self.session_save_path = None # Reset session path
+        self.root.title("ANNIE - Annotation Interface") # Reset title
+        self.status_var.set("Ready. Open a directory or load a session.")
 
 
     def load_next_file(self):
@@ -506,81 +534,69 @@ class TextAnnotator:
             self.load_file(self.current_file_index - 1)
 
     def on_file_select(self, event):
-        # Need the widget that triggered the event if used with multiple listboxes
-        # widget = event.widget
         selected_indices = self.files_listbox.curselection()
         if selected_indices:
             index = selected_indices[0]
-            # Only load if the selection changed to a different file
+            # Load only if the selection changed to a different file index
             if index != self.current_file_index:
                 self.load_file(index)
 
-
+    # --- Annotation Saving (Annotations ONLY) ---
     def save_annotations(self):
-        """Saves all annotations (entities and relations) for all loaded files to a JSON file."""
-        # Check if there's anything worth saving
+        """Saves ONLY annotations (entities/relations) for all files to a JSON file."""
         if not self.annotations or all(not data.get('entities') and not data.get('relations') for data in self.annotations.values()):
-            messagebox.showinfo("Info", "There are no annotations to save.")
+            messagebox.showinfo("Info", "There are no annotations to save.", parent=self.root)
             return
 
-        # Suggest a save location and filename
-        initial_dir = ""
-        initial_file = "annotations.json"
-        if self.files_list:
-            try:
-                # Use the directory of the first loaded text file
-                first_file_dir = os.path.dirname(self.files_list[0])
-                initial_dir = first_file_dir
-                dir_name = os.path.basename(first_file_dir)
-                if dir_name: # If it's not the root directory
-                    initial_file = dir_name + "_annotations.json"
-            except Exception as e:
-                 print(f"Info: Could not determine initial directory/filename suggestion: {e}")
-
+        # Suggest save location based on the first file's directory
+        initial_dir = os.path.dirname(self.files_list[0]) if self.files_list else ""
+        initial_file = "annotations_only.json"
+        if initial_dir:
+             dir_name = os.path.basename(initial_dir)
+             if dir_name: initial_file = f"{dir_name}_annotations_only.json"
 
         save_path = filedialog.asksaveasfilename(
             initialdir=initial_dir,
             initialfile=initial_file,
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            title="Save Annotations As"
+            title="Save Annotations ONLY As",
+            parent=self.root
         )
 
-        if not save_path: # User cancelled
-            self.status_var.set("Save cancelled.")
+        if not save_path:
+            self.status_var.set("Save annotations cancelled.")
             return
 
-        # Prepare data for serialization: use relative paths if possible
+        # Prepare data: Use relative paths if possible, relative to the SAVE location
+        save_dir = os.path.dirname(save_path)
         serializable_annotations = {}
-        base_dir = os.path.dirname(self.files_list[0]) if self.files_list else None
 
         for file_path, data in self.annotations.items():
             entities = data.get("entities", [])
             relations = data.get("relations", [])
+            if not entities and not relations: continue # Skip empty
 
-            # Skip files with no annotations
-            if not entities and not relations:
-                continue
-
-            # Determine the key for the JSON (relative path or filename)
-            key = file_path
+            key = file_path # Default to full path
             try:
-                # Check if the file_path is within the base_dir
-                if base_dir and os.path.commonpath([file_path, base_dir]) == base_dir:
-                    key = os.path.relpath(file_path, start=base_dir).replace('\\', '/') # Use forward slashes
-                else:
-                    # Fallback to just the filename if not in the same directory structure
-                    key = os.path.basename(file_path)
-            except ValueError: # Might happen on Windows if paths are on different drives
-                 key = os.path.basename(file_path) # Fallback to filename
+                # Make path relative to the *save* directory if possible
+                rel_path = os.path.relpath(file_path, start=save_dir)
+                # Check if it actually became relative (doesn't start with .. on same drive, or is not full path on different drive)
+                # This check is imperfect across OS/drives, but a basic attempt.
+                # A more robust check might involve Pathlib's is_relative_to (Python 3.9+) or more complex os.path logic.
+                # For simplicity, we'll try os.path.relpath and use it if it doesn't look like an absolute path or ../../ etc.
+                # A safer bet might be to just store basenames if not in the same root tree.
+                if not os.path.isabs(rel_path) and not rel_path.startswith(('..'+os.sep, '..'+'/')):
+                    key = rel_path.replace('\\', '/') # Use forward slashes for consistency
+                else: # Fallback to basename if it seems outside the save hierarchy
+                     key = os.path.basename(file_path)
+            except ValueError: # Handle different drives on Windows
+                key = os.path.basename(file_path)
             except Exception as e:
-                print(f"Warning: Error determining relative path for {file_path}, using basename. Error: {e}")
+                print(f"Warning: Error calculating relative path for {file_path} relative to {save_dir}. Using basename. Error: {e}")
                 key = os.path.basename(file_path)
 
-            # Sort annotations for consistent output (optional but good practice)
-            # Sort entities by position
             sorted_entities = sorted(entities, key=lambda a: (a.get('start_line', 0), a.get('start_char', 0)))
-            # Sort relations by type then head ID
             sorted_relations = sorted(relations, key=lambda r: (r.get('type', ''), r.get('head_id','')))
 
             serializable_annotations[key] = {
@@ -588,50 +604,252 @@ class TextAnnotator:
                 "relations": sorted_relations
             }
 
-        # Write to JSON file
+        # Write to JSON
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_annotations, f, indent=2, ensure_ascii=False)
-            self.status_var.set(f"Annotations saved to '{os.path.basename(save_path)}'")
-        except IOError as e:
-            messagebox.showerror("Save Error", f"Could not write to file '{save_path}':\n{e}")
-            self.status_var.set("Error saving annotations (IO Error).")
-        except Exception as e: # Catch potential JSON serialization errors etc.
-             messagebox.showerror("Save Error", f"Failed to save annotations due to an unexpected error:\n{str(e)}")
-             self.status_var.set("Error saving annotations.")
+            self.status_var.set(f"Annotations ONLY saved to '{os.path.basename(save_path)}'")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not write annotations to file:\n{e}", parent=self.root)
+            self.status_var.set("Error saving annotations.")
 
 
-    # --- Entity Annotation ---
+    # --- NEW: Session Save/Load ---
+    def save_session(self, force_ask=False):
+        """Saves the entire application state (files, annotations, settings) to a session file."""
+        if not self.files_list:
+            messagebox.showwarning("Cannot Save Session", "Please open a directory first.", parent=self.root)
+            return
 
-    # Helper for checking span overlap based on numeric line/char indices
+        save_path = self.session_save_path
+        if force_ask or not save_path:
+            # Suggest save location based on the first file's directory
+            initial_dir = os.path.dirname(self.files_list[0]) if self.files_list else ""
+            initial_file = "annie_session.json"
+            if initial_dir:
+                dir_name = os.path.basename(initial_dir)
+                if dir_name: initial_file = f"{dir_name}_session.json"
+
+            save_path = filedialog.asksaveasfilename(
+                initialdir=initial_dir,
+                initialfile=initial_file,
+                defaultextension=".json",
+                filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")],
+                title="Save Session As",
+                parent=self.root
+            )
+
+        if not save_path:
+            self.status_var.set("Save session cancelled.")
+            return
+
+        # Prepare session data
+        session_data = {
+            "version": SESSION_FILE_VERSION,
+            "files_list": self.files_list, # Store full paths
+            "current_file_index": self.current_file_index,
+            "entity_tags": self.entity_tags,
+            "relation_types": self.relation_types,
+            "tag_colors": self.tag_colors,
+            "annotations": self.annotations # Store with full paths as keys
+            # Add other state variables if needed in the future (e.g., extend_to_word state)
+             # "extend_to_word": self.extend_to_word.get()
+        }
+
+        # Write to JSON file
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, indent=2, ensure_ascii=False)
+            self.session_save_path = save_path # Remember path for next quick save
+            self.status_var.set(f"Session saved to '{os.path.basename(save_path)}'")
+            self.root.title(f"ANNIE - {os.path.basename(os.path.dirname(self.files_list[0]))} [{os.path.basename(save_path)}]") # Update title
+        except Exception as e:
+            messagebox.showerror("Save Session Error", f"Could not write session file:\n{e}", parent=self.root)
+            self.status_var.set("Error saving session.")
+            self.session_save_path = None # Failed, clear path
+
+    def load_session(self):
+        """Loads application state from a session file."""
+        # --- Check for unsaved changes before discarding current state ---
+        if self._has_unsaved_changes():
+             if not messagebox.askyesno("Unsaved Changes", "You have unsaved changes in the current session.\nDiscard changes and load session?", parent=self.root):
+                 return # User cancelled
+
+        load_path = filedialog.askopenfilename(
+            defaultextension=".json",
+            filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")],
+            title="Load Session",
+            parent=self.root
+        )
+
+        if not load_path:
+            self.status_var.set("Load session cancelled.")
+            return
+
+        # Read and parse JSON
+        try:
+            with open(load_path, 'r', encoding='utf-8') as f:
+                session_data = json.load(f)
+        except FileNotFoundError:
+            messagebox.showerror("Load Session Error", f"File not found:\n{load_path}", parent=self.root)
+            return
+        except json.JSONDecodeError as e:
+            messagebox.showerror("Load Session Error", f"Invalid session file format (JSON Error):\n{e}", parent=self.root)
+            return
+        except Exception as e:
+            messagebox.showerror("Load Session Error", f"Could not read session file:\n{e}", parent=self.root)
+            return
+
+        # --- Basic Validation ---
+        required_keys = ["version", "files_list", "current_file_index",
+                         "entity_tags", "relation_types", "tag_colors", "annotations"]
+        if not all(key in session_data for key in required_keys):
+            messagebox.showerror("Load Session Error", "Session file is missing required data.", parent=self.root)
+            return
+        if not isinstance(session_data.get("files_list"), list) or \
+           not isinstance(session_data.get("current_file_index"), int) or \
+           not isinstance(session_data.get("annotations"), dict) or \
+           not isinstance(session_data.get("entity_tags"), list) or \
+           not isinstance(session_data.get("relation_types"), list) or \
+           not isinstance(session_data.get("tag_colors"), dict):
+            messagebox.showerror("Load Session Error", "Session file contains data with incorrect types.", parent=self.root)
+            return
+
+        # Version check (optional but good practice)
+        loaded_version = session_data.get("version", "0.0")
+        # Example: if loaded_version < "1.0": messagebox.showwarning(...)
+        # print(f"Loading session version: {loaded_version}") # For debug
+
+        # --- Check if text files still exist ---
+        loaded_files_list = session_data["files_list"]
+        missing_files = [fp for fp in loaded_files_list if not os.path.isfile(fp)]
+        if missing_files:
+            msg = f"Some text files referenced in the session could not be found:\n"
+            msg += "\n".join([f"- {os.path.basename(mf)} ({os.path.dirname(mf)})" for mf in missing_files[:5]])
+            if len(missing_files) > 5: msg += "\n..."
+            msg += "\n\nContinue loading session? Annotations for missing files will be kept but files cannot be displayed."
+            if not messagebox.askyesno("Missing Files", msg, parent=self.root):
+                self.status_var.set("Load session cancelled due to missing files.")
+                return
+
+        # --- Restore State ---
+        self._reset_state() # Clear current state *before* loading new
+
+        try:
+            self.files_list = loaded_files_list
+            self.current_file_index = session_data["current_file_index"]
+            self.annotations = session_data["annotations"]
+            self.entity_tags = session_data["entity_tags"]
+            self.relation_types = session_data["relation_types"]
+            self.tag_colors = session_data["tag_colors"]
+            # self.extend_to_word.set(session_data.get("extend_to_word", False)) # Example for loading other state
+
+            self.session_save_path = load_path # Remember loaded session path
+
+            # --- Update UI ---
+            self.files_listbox.delete(0, tk.END)
+            for file_path in self.files_list:
+                # Indicate missing files in the listbox (optional)
+                display_name = os.path.basename(file_path)
+                if file_path in missing_files:
+                    display_name += " [MISSING]"
+                self.files_listbox.insert(tk.END, display_name)
+
+            # Validate current_file_index
+            if not (0 <= self.current_file_index < len(self.files_list)):
+                 messagebox.showwarning("Load Session Warning", "Saved file index is out of bounds. Loading first file instead.", parent=self.root)
+                 self.current_file_index = 0 if self.files_list else -1
+
+            # Update settings UI elements
+            self._update_entity_tag_combobox()
+            self._update_relation_type_combobox()
+            self._configure_text_tags() # Apply loaded colors
+            self._configure_treeview_tags() # Ensure treeview styles are set
+
+            # Load the correct file (if index is valid)
+            if self.current_file_index != -1:
+                # Check if the target file is missing before attempting to load
+                if self.files_list[self.current_file_index] in missing_files:
+                     self.status_var.set(f"Session loaded. Current file '{os.path.basename(self.files_list[self.current_file_index])}' is missing.")
+                     self.clear_views() # Clear text area etc. as file can't be shown
+                     # Visually select in listbox
+                     self.files_listbox.selection_clear(0, tk.END)
+                     self.files_listbox.selection_set(self.current_file_index)
+                     self.files_listbox.activate(self.current_file_index)
+                     self.files_listbox.see(self.current_file_index)
+                     self._update_button_states() # Update buttons (text area will be disabled)
+                else:
+                    # Force load even if index seems the same initially after reset
+                    current_idx_temp = self.current_file_index
+                    self.current_file_index = -1 # Trick load_file into thinking index changed
+                    self.load_file(current_idx_temp)
+            else:
+                 # No files in list or invalid index after load
+                 self.status_var.set("Session loaded, but no files to display.")
+                 self.clear_views()
+                 self._update_button_states()
+
+            # Update window title
+            base_dir_name = "Session"
+            if self.files_list:
+                 try: base_dir_name = os.path.basename(os.path.dirname(self.files_list[0]))
+                 except: pass # Ignore errors getting dirname
+            self.root.title(f"ANNIE - {base_dir_name} [{os.path.basename(load_path)}]")
+
+        except Exception as e:
+            # Catch unexpected errors during state restoration
+            messagebox.showerror("Load Session Error", f"An error occurred while applying session data:\n{e}", parent=self.root)
+            self._reset_state() # Attempt to reset to a clean state
+            self._update_button_states()
+
+
+    # --- Check for Unsaved Changes ---
+    def _has_unsaved_changes(self):
+        """Checks if there are potential unsaved changes in the current session."""
+        # This is a simple check. A more robust check would compare the current state
+        # to the state when the session was last saved or loaded.
+        # For now, just check if there are any files loaded and any annotations exist.
+        # Or, if a session was loaded/saved, check if the current state differs.
+        # Let's keep it simple: if files are loaded, assume potential changes.
+        return bool(self.files_list) # Returns True if a directory/session is loaded
+
+    def _on_closing(self):
+        """Handles the window close event."""
+        if self._has_unsaved_changes():
+             if messagebox.askyesno("Exit Confirmation", "You have an active session.\nSave session before exiting?", parent=self.root):
+                 self.save_session() # Attempt to save
+                 # Check if save was successful (or cancelled) - tricky without return value check
+                 # Assume save worked or user cancelled, then quit.
+                 # If save failed, the error message would have popped up.
+                 self.root.quit()
+             else:
+                 # User chose not to save
+                 self.root.quit()
+        else:
+            # No unsaved changes detected
+            self.root.quit()
+
+
+    # --- Entity Annotation (Largely Unchanged) ---
+    # Helper functions _spans_overlap_numeric, _is_overlapping_in_list, _is_overlapping_current_file (Unchanged)
     def _spans_overlap_numeric(self, start1_line, start1_char, end1_line, end1_char,
-                               start2_line, start2_char, end2_line, end2_char):
+                             start2_line, start2_char, end2_line, end2_char):
         """Checks if two spans, defined by line/char numbers, overlap."""
-        # Convert to comparable tuples (line, char)
         span1_start = (start1_line, start1_char)
         span1_end = (end1_line, end1_char)
         span2_start = (start2_line, start2_char)
         span2_end = (end2_line, end2_char)
-
-        # Ensure start <= end for each span for comparison logic
         if span1_start > span1_end: span1_start, span1_end = span1_end, span1_start
         if span2_start > span2_end: span2_start, span2_end = span2_end, span2_start
-
-        # Check for non-overlap conditions
-        # Span 1 ends before Span 2 starts OR Span 1 starts after Span 2 ends
         is_disjoint = (span1_end <= span2_start) or (span1_start >= span2_end)
-
         return not is_disjoint
 
-    # Helper to check overlap against a list of existing entity dictionaries
     def _is_overlapping_in_list(self, start_line, start_char, end_line, end_char, existing_entities_list):
         """Checks if the given span overlaps with any entity in the provided list."""
         for ann in existing_entities_list:
-            # Ensure the existing annotation has the necessary keys
             if not all(k in ann for k in ['start_line', 'start_char', 'end_line', 'end_char']):
-                print(f"Warning: Skipping overlap check against entity {ann.get('id','N/A')} due to missing position keys.")
+                print(f"Warning: Skipping overlap check against entity {ann.get('id','N/A')} missing position.")
                 continue
-
             if self._spans_overlap_numeric(
                 start_line, start_char, end_line, end_char,
                 ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char']
@@ -639,208 +857,151 @@ class TextAnnotator:
                 return True # Overlap found
         return False # No overlap found
 
-    # Specific check against entities in the currently loaded file
     def _is_overlapping_current_file(self, start_line, start_char, end_line, end_char):
         """Checks if the given span overlaps with existing ENTITIES in the *currently loaded* file's data."""
+        if not self.current_file_path: return False # No file loaded
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
-        if not entities:
-             return False # No existing entities to overlap with
+        if not entities: return False
         return self._is_overlapping_in_list(start_line, start_char, end_line, end_char, entities)
-
 
     def annotate_selection(self):
         """Annotates the selected text in the text_area as an entity."""
         if not self.current_file_path:
-            messagebox.showinfo("Info", "Please load a file first.")
+            messagebox.showinfo("Info", "Please load a file first.", parent=self.root)
             return
         if not self.entity_tags:
-             messagebox.showwarning("Warning", "No entity tags defined. Please manage entity tags first.")
-             return
+            messagebox.showwarning("Warning", "No entity tags defined.", parent=self.root)
+            return
 
         try:
-            # Get selection indices from the text area
             start_pos = self.text_area.index(tk.SEL_FIRST)
             end_pos = self.text_area.index(tk.SEL_LAST)
             selected_text = self.text_area.get(start_pos, end_pos)
 
-            # Basic validation
-            if not selected_text.strip(): # Ignore if only whitespace selected
-                messagebox.showinfo("Info", "No text selected or selection is only whitespace.")
+            if not selected_text.strip():
+                messagebox.showinfo("Info", "No text selected or selection is only whitespace.", parent=self.root)
                 return
 
-            # Convert indices to numeric line/char
             start_line, start_char = map(int, start_pos.split('.'))
             end_line, end_char = map(int, end_pos.split('.'))
-
-            # Get selected tag
             tag = self.selected_entity_tag.get()
             if not tag:
-                messagebox.showwarning("Warning", "No entity tag selected.")
+                messagebox.showwarning("Warning", "No entity tag selected.", parent=self.root)
                 return
 
-            # Check for overlap with existing annotations in this file
             if self._is_overlapping_current_file(start_line, start_char, end_line, end_char):
-                messagebox.showwarning("Overlap Detected", "The selected text overlaps with an existing entity.")
+                messagebox.showwarning("Overlap Detected", "The selected text overlaps with an existing entity.", parent=self.root)
                 return
 
-            # Get or create the annotation data for the current file
             file_data = self.annotations.setdefault(self.current_file_path, {"entities": [], "relations": []})
             entities_list = file_data.setdefault("entities", [])
 
-            # Create the new annotation dictionary
-            entity_id = uuid.uuid4().hex # Generate unique ID
+            entity_id = uuid.uuid4().hex
             annotation = {
-                'id': entity_id,
-                'start_line': start_line,
-                'start_char': start_char,
-                'end_line': end_line,
-                'end_char': end_char,
-                'text': selected_text,
-                'tag': tag
+                'id': entity_id, 'start_line': start_line, 'start_char': start_char,
+                'end_line': end_line, 'end_char': end_char, 'text': selected_text, 'tag': tag
             }
-
-            # Add to internal data structure
             entities_list.append(annotation)
 
-            # Apply visual tag in the text area
-            # Ensure the tag is configured with a color first
-            if tag not in self.text_area.tag_names():
-                self._configure_text_tags()
-            # Check again if configuration worked (might fail for odd reasons)
-            if tag in self.text_area.tag_names():
-                 self.text_area.tag_add(tag, start_pos, end_pos)
-            else:
-                 print(f"Warning: Could not apply unconfigured tag '{tag}' to text area.")
+            # Apply visual tag
+            if tag not in self.text_area.tag_names(): self._configure_text_tags()
+            if tag in self.text_area.tag_names(): self.text_area.tag_add(tag, start_pos, end_pos)
+            else: print(f"Warning: Could not apply unconfigured tag '{tag}'")
 
-            # Update the entities list display
-            self.update_entities_list()
+            self.update_entities_list() # Update list display
 
-            # Select the newly added entity in the list for user feedback
-            # Need update_idletasks to ensure treeview is populated before selection attempt
+            # Select new entity in list
             self.root.update_idletasks()
             try:
                 if self.entities_tree.exists(entity_id):
-                     self.entities_tree.selection_set(entity_id)
-                     self.entities_tree.focus(entity_id)
-                     self.entities_tree.see(entity_id)
-                else:
-                     print(f"Warning: Could not select new entity {entity_id} in tree.")
-            except Exception as e:
-                print(f"Error selecting newly added entity {entity_id} in tree: {e}")
+                    self.entities_tree.selection_set(entity_id)
+                    self.entities_tree.focus(entity_id)
+                    self.entities_tree.see(entity_id)
+            except Exception as e: print(f"Error selecting new entity {entity_id}: {e}")
 
-            # Update status bar
             status_text = f"Annotated: '{selected_text[:30].replace(os.linesep, ' ')}...' as {tag}"
             self.status_var.set(status_text)
-            self._update_button_states() # Update buttons (e.g., Remove might become enabled)
+            self._update_button_states()
 
         except tk.TclError as e:
-            # Handle specific TclError for no selection
             if "text doesn't contain selection" in str(e).lower():
-                messagebox.showinfo("Info", "Please select text to annotate.")
-            else:
-                # Show other TclErrors
-                messagebox.showerror("Annotation Error", f"A Tkinter error occurred:\n{e}")
-        except Exception as e:
-             # Catch any other unexpected errors during annotation
-             messagebox.showerror("Annotation Error", f"An unexpected error occurred during annotation:\n{e}")
-
+                messagebox.showinfo("Info", "Please select text to annotate.", parent=self.root)
+            else: messagebox.showerror("Annotation Error", f"A Tkinter error occurred:\n{e}", parent=self.root)
+        except Exception as e: messagebox.showerror("Annotation Error", f"An unexpected error occurred:\n{e}", parent=self.root)
 
     def remove_entity_annotation(self):
-        """Removes selected entities from the Entities list and any relations associated with them."""
+        """Removes selected entities and their associated relations."""
         selected_iids = self.entities_tree.selection()
         if not selected_iids:
-            messagebox.showinfo("Info", "Select one or more entities from the list to remove.")
+            messagebox.showinfo("Info", "Select one or more entities to remove.", parent=self.root)
             return
-
         if not self.current_file_path or self.current_file_path not in self.annotations:
-            messagebox.showerror("Error", "Cannot remove entity: No file or annotations loaded.")
+            messagebox.showerror("Error", "Cannot remove entity: No file/annotations.", parent=self.root)
             return
 
-        # Confirmation dialog
         confirm = messagebox.askyesno("Confirm Removal",
-            f"Remove {len(selected_iids)} selected entities?\n\n"
-            f"WARNING: This will also remove any relations involving these entities.")
-        if not confirm:
-            return
+            f"Remove {len(selected_iids)} entities?\nWARNING: This removes associated relations.", parent=self.root)
+        if not confirm: return
 
         file_data = self.annotations.get(self.current_file_path, {})
         entities = file_data.get("entities", [])
         relations = file_data.get("relations", [])
 
         removed_entity_count = 0
-        relations_to_remove_ids = set() # Store IDs of relations to be removed
-        entities_remaining = [] # Build a new list of entities to keep
+        relations_to_remove_ids = set()
+        entities_remaining = []
 
-        # Process entities
         for entity in entities:
             entity_id = entity.get('id')
-            if not entity_id:
-                entities_remaining.append(entity) # Keep entities without IDs? Or log error? Let's keep.
-                continue
-
             if entity_id in selected_iids:
                 removed_entity_count += 1
-                # Remove corresponding highlight from text area
+                # Remove highlight (best effort)
                 try:
                     start_pos = f"{entity['start_line']}.{entity['start_char']}"
                     end_pos = f"{entity['end_line']}.{entity['end_char']}"
                     tag = entity.get('tag')
-                    # Only remove if tag exists and text area is normal
                     if tag and tag in self.entity_tags and self.text_area.cget('state') == tk.NORMAL:
                          self.text_area.tag_remove(tag, start_pos, end_pos)
-                except (tk.TclError, KeyError) as e:
-                     print(f"Warning: Could not remove tag for removed entity {entity_id}: {e}")
+                except Exception: pass # Ignore errors removing tag
 
-                # Mark relations involving this entity for removal
+                # Mark associated relations
                 if relations:
                     for relation in relations:
-                         relation_id = relation.get('id')
-                         if not relation_id: continue
-                         if relation.get('head_id') == entity_id or relation.get('tail_id') == entity_id:
-                             relations_to_remove_ids.add(relation_id)
+                        relation_id = relation.get('id')
+                        if not relation_id: continue
+                        if relation.get('head_id') == entity_id or relation.get('tail_id') == entity_id:
+                            relations_to_remove_ids.add(relation_id)
             else:
-                # This entity was not selected for removal, keep it
-                entities_remaining.append(entity)
+                entities_remaining.append(entity) # Keep this one
 
         # Filter relations
-        relations_remaining = []
-        if relations:
-            relations_remaining = [rel for rel in relations if rel.get('id') not in relations_to_remove_ids]
+        relations_remaining = [rel for rel in relations if rel.get('id') not in relations_to_remove_ids] if relations else []
         removed_relation_count = (len(relations) if relations else 0) - len(relations_remaining)
 
-        # Update the annotations data structure
+        # Update data structure
         self.annotations[self.current_file_path]["entities"] = entities_remaining
         self.annotations[self.current_file_path]["relations"] = relations_remaining
 
         # Refresh UI
         self.update_entities_list()
         self.update_relations_list()
-        # Re-apply highlights for remaining entities (simpler than selective removal sometimes)
-        self.apply_annotations_to_text()
+        self.apply_annotations_to_text() # Re-apply remaining highlights
 
-        self.status_var.set(f"Removed {removed_entity_count} entities and {removed_relation_count} associated relations.")
-        self._update_button_states() # Update button states
+        self.status_var.set(f"Removed {removed_entity_count} entities, {removed_relation_count} relations.")
+        self._update_button_states()
 
-
-    # <<< NEW METHOD for Merging >>>
     def merge_selected_entities(self):
         """Merges selected entities in the list to share the same ID."""
         selected_iids = self.entities_tree.selection()
         if len(selected_iids) < 2:
-            messagebox.showinfo("Info", "Select two or more entities from the list to merge.")
+            messagebox.showinfo("Info", "Select 2+ entities to merge.", parent=self.root)
             return
-
         if not self.current_file_path or self.current_file_path not in self.annotations:
-            messagebox.showerror("Error", "Cannot merge entities: No file or annotations loaded.")
+            messagebox.showerror("Error", "Cannot merge: No file/annotations.", parent=self.root)
             return
 
-        confirm = messagebox.askyesno(
-            "Confirm Merge",
-            f"Merge {len(selected_iids)} selected entities?\n\n"
-            f"One ID will be chosen (the earliest occurring) and applied to all selected entities. "
-            f"Any relations involving the other IDs will be updated to point to the chosen ID.\n\n"
-            f"This action modifies the underlying annotation data."
-        )
+        confirm = messagebox.askyesno("Confirm Merge",
+            f"Merge {len(selected_iids)} entities?\nOne ID (earliest occurrence) will be used for all.\nRelations will be updated. Duplicate relations removed.", parent=self.root)
         if not confirm:
             self.status_var.set("Merge cancelled.")
             return
@@ -849,172 +1010,121 @@ class TextAnnotator:
         entities = file_data.get("entities", [])
         relations = file_data.get("relations", [])
 
-        # Find the actual entity dicts for selected iids and sort them by position
+        # Find entity data for selected iids, ensure position data exists
         selected_entities_data = []
-        for iid in selected_iids:
-            found = False
-            for entity in entities:
-                if entity.get('id') == iid:
-                    try:
-                        # Ensure position data exists for sorting
-                        pos = (entity['start_line'], entity['start_char'])
-                        selected_entities_data.append(entity)
-                        found = True
-                        break # Found the entity for this iid
-                    except KeyError:
-                         print(f"Warning: Skipping entity {iid} during merge - missing position data.")
-            if not found:
-                print(f"Warning: Selected entity ID {iid} not found in current file data.")
-                # It's possible it was deleted between selection and clicking merge, although unlikely.
-                # You could choose to abort here or continue with the ones found. Let's continue.
+        found_ids = set()
+        for entity in entities:
+             eid = entity.get('id')
+             if eid in selected_iids and eid not in found_ids: # Process each selected ID only once
+                 if all(k in entity for k in ['start_line', 'start_char']):
+                      selected_entities_data.append(entity)
+                      found_ids.add(eid)
+                 else:
+                      print(f"Warning: Skipping entity {eid} in merge - missing position.")
 
         if len(selected_entities_data) < 2:
-             messagebox.showerror("Error", "Could not find at least two valid entities to merge from the selection.")
-             return
+            messagebox.showerror("Error", "Need at least two valid entities with position data to merge.", parent=self.root)
+            return
 
-        # Sort by start position (line, then char) to find the canonical one
+        # Sort by position to find canonical ID
         selected_entities_data.sort(key=lambda e: (e.get('start_line', 0), e.get('start_char', 0)))
-
-        # The first entity in the sorted list provides the canonical ID
         canonical_entity = selected_entities_data[0]
         canonical_id = canonical_entity.get('id')
         if not canonical_id:
-            messagebox.showerror("Error", "Failed to determine canonical ID for merging.")
+            messagebox.showerror("Error", "Failed to determine canonical ID.", parent=self.root)
             return
 
-        # Create a set of IDs that need to be changed to the canonical ID
         ids_to_merge_away = {e.get('id') for e in selected_entities_data if e.get('id') != canonical_id and e.get('id')}
-
         if not ids_to_merge_away:
-             messagebox.showinfo("Info", "Selected entities already share the same ID or only one valid entity found.")
-             return
+            messagebox.showinfo("Info", "Selected entities already share the same ID or only one valid entity found.", parent=self.root)
+            return
 
         modified_entity_count = 0
         modified_relation_count = 0
 
-        # --- Perform the merge in the data structure ---
-
         # 1. Update Entity IDs
-        # Iterate through the main entities list and update IDs in place
         for i, entity in enumerate(entities):
             if entity.get('id') in ids_to_merge_away:
                 entities[i]['id'] = canonical_id
-                modified_entity_count += 1 # Count how many entity records were changed
+                modified_entity_count += 1
 
         # 2. Update Relation IDs
-        if relations: # Only process if relations exist
+        if relations:
             for i, rel in enumerate(relations):
-                relation_modified_this_iter = False # Track if this specific relation was changed
-                current_head_id = rel.get('head_id')
-                current_tail_id = rel.get('tail_id')
-
-                if current_head_id in ids_to_merge_away:
+                relation_modified = False
+                if rel.get('head_id') in ids_to_merge_away:
                     relations[i]['head_id'] = canonical_id
-                    relation_modified_this_iter = True
-                if current_tail_id in ids_to_merge_away:
+                    relation_modified = True
+                if rel.get('tail_id') in ids_to_merge_away:
                     relations[i]['tail_id'] = canonical_id
-                    relation_modified_this_iter = True
+                    relation_modified = True
+                if relation_modified: modified_relation_count += 1
 
-                if relation_modified_this_iter:
-                    modified_relation_count += 1 # Count changed relation *references*
-
-
-        # 3. (Optional but recommended) Remove potentially duplicate relations created by the merge
-        if relations and modified_relation_count > 0: # Only check if relations were potentially changed
+        # 3. Remove duplicate relations potentially created by merge
+        removed_duplicates = 0
+        if relations and modified_relation_count > 0: # Only check if changes might have occurred
             unique_relations = []
-            seen_relations = set() # Store signatures (head_id, tail_id, type) of unique relations
-            relations_before_dedup = len(relations)
-
+            seen_signatures = set() # (head_id, tail_id, type)
             for rel in relations:
-                # Create a tuple signature for the relation (ignoring the 'id' field)
-                rel_sig = (rel.get('head_id'), rel.get('tail_id'), rel.get('type'))
-
-                # Check for self-loops (optional: decide whether to keep or remove them)
-                if rel.get('head_id') == rel.get('tail_id'):
-                    print(f"Warning: Relation {rel.get('id')} became a self-loop after merge. Keeping it.")
-                    # Alternatively, to remove self-loops:
-                    # print(f"Info: Removing relation {rel.get('id')} as it became a self-loop after merge.")
-                    # continue # Skip adding this self-loop relation to unique_relations
-
-                # Check if this exact relation signature has been seen before
-                if rel_sig not in seen_relations:
-                    seen_relations.add(rel_sig)
-                    unique_relations.append(rel) # Keep the first occurrence
+                # Ignore self-loops if they arise? Current logic keeps them.
+                # if rel.get('head_id') == rel.get('tail_id'): continue # Optional: remove self-loops
+                sig = (rel.get('head_id'), rel.get('tail_id'), rel.get('type'))
+                if sig not in seen_signatures:
+                    seen_signatures.add(sig)
+                    unique_relations.append(rel)
                 else:
-                     # Log the removal of a duplicate
-                     print(f"Info: Removing duplicate relation (Head: {rel.get('head_id')[:6]}..., Tail: {rel.get('tail_id')[:6]}..., Type: {rel.get('type')}) created by merge.")
+                    removed_duplicates += 1
+                    # print(f"Info: Removing duplicate relation: {sig}")
 
-            removed_duplicates = relations_before_dedup - len(unique_relations)
             if removed_duplicates > 0:
-                 # Update the main relations list in the annotations
                  self.annotations[self.current_file_path]["relations"] = unique_relations
-                 # Adjust the count for the status message (optional)
-                 # modified_relation_count -= removed_duplicates # This might be confusing, maybe report separately
 
 
         # --- Update UI ---
+        self.update_entities_list() # Will re-render with 'merged' tag
+        self.update_relations_list() # Will show updated head/tail
 
-        # 4. Refresh Treeviews
-        self.update_entities_list() # This will re-render the list and apply the 'merged' tag visually
-        self.update_relations_list() # This will show updated head/tail entity references
-
-        # 5. Re-select the merged entities in the tree for visual feedback
-        self.root.update_idletasks() # Allow tkinter to process UI updates
+        # Re-select the items that now share the canonical ID
+        self.root.update_idletasks()
         try:
-            # Clear previous selection first
-            self.entities_tree.selection_set([])
+            self.entities_tree.selection_set([]) # Clear selection
+            items_to_reselect = []
+            for item_iid in self.entities_tree.get_children(""):
+                # Check the 'ID' value stored in the treeview item (index 0)
+                item_values = self.entities_tree.item(item_iid, 'values')
+                if item_values and item_values[0] == canonical_id:
+                    items_to_reselect.append(item_iid)
 
-            # Find all tree items that now have the canonical ID
-            items_with_canonical_id = []
-            for item_iid in self.entities_tree.get_children(""): # Iterate over top-level items
-                 # Get the actual values associated with the tree item
-                 item_values = self.entities_tree.item(item_iid, 'values')
-                 # Check if the first value (which corresponds to the 'ID' column data) matches
-                 if item_values and item_values[0] == canonical_id:
-                     items_with_canonical_id.append(item_iid)
+            if items_to_reselect:
+                self.entities_tree.selection_set(items_to_reselect)
+                self.entities_tree.focus(items_to_reselect[0])
+                self.entities_tree.see(items_to_reselect[0])
+        except Exception as e: print(f"Warning: Error re-selecting merged entities: {e}")
 
-            if items_with_canonical_id:
-                # Select all found items
-                self.entities_tree.selection_set(items_with_canonical_id)
-                # Focus and ensure the first one is visible
-                self.entities_tree.focus(items_with_canonical_id[0])
-                self.entities_tree.see(items_with_canonical_id[0])
-
-        except Exception as e:
-            print(f"Warning: Error re-selecting merged entities in tree: {e}")
-
-        # 6. Update status bar
-        status_msg = f"Merged {len(selected_iids)} entities to ID {canonical_id[:6]}.... Updated {modified_relation_count} relation references."
-        if 'removed_duplicates' in locals() and removed_duplicates > 0:
-            status_msg += f" Removed {removed_duplicates} duplicate relations."
+        # Update status
+        status_msg = f"Merged {len(selected_iids)} entities to ID {canonical_id[:6]}.... Updated {modified_relation_count} relations."
+        if removed_duplicates > 0: status_msg += f" Removed {removed_duplicates} duplicates."
         self.status_var.set(status_msg)
-
-        # 7. Update button states (e.g., merge button might become disabled if only 1 is selected now)
         self._update_button_states()
 
 
     def apply_annotations_to_text(self):
-        """Applies highlighting for all ENTITIES of the current file to the text area."""
-        if not self.current_file_path:
-             return
+        """Applies highlighting for all ENTITIES of the current file."""
+        if not self.current_file_path or self.text_area.cget('state') == tk.DISABLED:
+            return # Don't try if no file or text area is disabled
 
         original_state = self.text_area.cget('state')
-        if original_state == tk.DISABLED:
-            self.text_area.config(state=tk.NORMAL) # Enable to modify tags
+        if original_state == tk.DISABLED: self.text_area.config(state=tk.NORMAL)
 
-        # Remove all existing entity tags first to handle potential changes/removals
+        # Remove all existing entity tags first
         for tag in self.entity_tags:
-            try:
-                 self.text_area.tag_remove(tag, "1.0", tk.END)
-            except tk.TclError:
-                 pass # Ignore errors if tag doesn't exist
+            try: self.text_area.tag_remove(tag, "1.0", tk.END)
+            except tk.TclError: pass
 
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
-
-        # Sort entities by position to apply tags correctly (though overlap isn't allowed here)
         sorted_entities = sorted(entities, key=lambda a: (a.get('start_line', 0), a.get('start_char', 0)))
 
-        # Re-apply tags based on the current entity list
+        # Re-apply tags
         for ann in sorted_entities:
             try:
                 start_pos = f"{ann['start_line']}.{ann['start_char']}"
@@ -1022,432 +1132,287 @@ class TextAnnotator:
                 tag = ann.get('tag')
 
                 if tag and tag in self.entity_tags:
-                    # Ensure the tag is configured (might have been added dynamically)
-                    if tag not in self.text_area.tag_names():
-                        self._configure_text_tags() # Attempt to configure it
+                    # Ensure tag is configured (might be newly loaded/added)
+                    if tag not in self.text_area.tag_names(): self._configure_text_tags()
+                    # Apply if configured
+                    if tag in self.text_area.tag_names(): self.text_area.tag_add(tag, start_pos, end_pos)
+                    else: print(f"Warning: Entity {ann.get('id','N/A')} tag '{tag}' unconfigurable.")
+                elif tag: print(f"Warning: Entity {ann.get('id','N/A')} unknown tag '{tag}'.")
+            except Exception as e: print(f"Warning: Error applying tag for entity {ann.get('id','N/A')}: {e}")
 
-                    # Apply the tag if it's now configured
-                    if tag in self.text_area.tag_names():
-                         self.text_area.tag_add(tag, start_pos, end_pos)
-                    else:
-                        print(f"Warning: Entity {ann.get('id','N/A')} has valid but unconfigurable tag '{tag}'. Highlighting skipped.")
-                elif tag:
-                    # Log if an entity has a tag not in the known list
-                    print(f"Warning: Entity {ann.get('id','N/A')} has unknown tag '{tag}'. Highlighting skipped.")
+        self.text_area.config(state=original_state) # Restore original state
 
-            except (tk.TclError, KeyError, ValueError) as e:
-                 # Catch errors during tag application (e.g., invalid indices, missing keys)
-                 print(f"Warning: Error applying tag for entity {ann.get('id','N/A')}: {e}")
-
-
-        # Restore the original text area state
-        self.text_area.config(state=original_state if self.current_file_path else tk.DISABLED)
 
     def update_entities_list(self):
         """Updates the Entities Treeview with entities for the current file."""
-        try:
-            # Preserve selection if possible (though merging might invalidate some selections)
-            # current_selection = self.entities_tree.selection()
-            self.entities_tree.delete(*self.entities_tree.get_children())
-        except Exception:
-            pass # Ignore if tree is empty
+        try: self.entities_tree.delete(*self.entities_tree.get_children())
+        except Exception: pass
+
+        if not self.current_file_path: # Handle case where file loading failed or no file loaded
+            self._update_button_states()
+            return
 
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         if not entities:
-             self.selected_entity_ids_for_relation = []
-             self._update_button_states()
-             return # Nothing to display
+            self.selected_entity_ids_for_relation = [] # Ensure clear if list empty
+            self._update_button_states()
+            return
 
-        # Sort entities primarily for consistent display order
         sorted_entities = sorted(entities, key=lambda a: (a.get('start_line', 0), a.get('start_char', 0)))
 
-        # <<< NEW: Count ID occurrences to identify merged entities >>>
+        # Count ID occurrences for 'merged' tag
         entity_id_counts = {}
         for ann in sorted_entities:
             entity_id = ann.get('id')
-            if entity_id:
-                entity_id_counts[entity_id] = entity_id_counts.get(entity_id, 0) + 1
+            if entity_id: entity_id_counts[entity_id] = entity_id_counts.get(entity_id, 0) + 1
 
-        # Populate the tree
+        # Populate tree
         for ann in sorted_entities:
             entity_id = ann.get('id')
-            if not entity_id:
-                print(f"Warning: Skipping entity with missing ID in list update: {ann}")
-                continue
+            if not entity_id: continue # Skip invalid data
 
             try:
                 start_pos_str = f"{ann['start_line']}.{ann['start_char']}"
                 end_pos_str = f"{ann['end_line']}.{ann['end_char']}"
                 full_text = ann.get('text', '')
-                # Shorten text for display, handle newlines
                 display_text = full_text.replace(os.linesep, ' ').replace('\n', ' ').replace('\r', '')[:60]
                 if len(full_text) > 60: display_text += "..."
-
                 tag = ann.get('tag', 'N/A')
 
-                # <<< NEW: Apply 'merged' tag if ID count > 1 >>>
-                treeview_tags = () # Default: no special tags
-                if entity_id_counts.get(entity_id, 0) > 1:
-                    treeview_tags = ('merged',) # Apply the tag we configured
+                # Apply 'merged' tag if needed
+                treeview_tags = ('merged',) if entity_id_counts.get(entity_id, 0) > 1 else ()
 
-                # Insert item using the entity ID as the Treeview item ID (iid)
-                # The 'values' tuple MUST match the order of the 'columns' definition,
-                # including the hidden 'ID' column at index 0.
-                self.entities_tree.insert(
-                    "", tk.END, iid=entity_id, values=(
-                        entity_id,       # Value for hidden "ID" column
-                        start_pos_str,   # Value for "Start" column
-                        end_pos_str,     # Value for "End" column
-                        display_text,    # Value for "Text" column
-                        tag              # Value for "Tag" column
-                    ),
-                    tags=treeview_tags # <<< Pass the tags here for styling
+                # Insert with entity ID as iid and also in the hidden 'ID' column value
+                self.entities_tree.insert("", tk.END, iid=entity_id,
+                    values=(entity_id, start_pos_str, end_pos_str, display_text, tag),
+                    tags=treeview_tags
                 )
-            except (KeyError, Exception) as e:
-                # Catch potential errors during item insertion
-                print(f"Error adding entity {entity_id} to list: {e}")
+            except Exception as e: print(f"Error adding entity {entity_id} to list: {e}")
 
-
-        # Clear relation selection helpers and update buttons
-        self.selected_entity_ids_for_relation = []
+        self.selected_entity_ids_for_relation = [] # Clear selection state on list update
         self._update_button_states()
-
-        # Optional: Try to restore selection if needed, but merging makes this tricky.
-        # It might be better to re-select based on the canonical ID as done in merge_selected_entities.
 
 
     def on_entity_select(self, event):
         """Handles selection changes in the Entities Treeview."""
         selected_iids = self.entities_tree.selection()
-        # Store the selected IDs (for relation creation or merging)
         self.selected_entity_ids_for_relation = list(selected_iids)
 
-        # Highlight corresponding text spans in the text area
+        # Highlight corresponding text spans
         if self.text_area.cget('state') == tk.NORMAL:
-            # Remove previous text selection highlight
-            self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-
+            self.text_area.tag_remove(tk.SEL, "1.0", tk.END) # Remove previous selection
             entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
-            first_entity_pos = None # To scroll to the first selected entity
+            first_entity_pos = None
 
             for iid in selected_iids:
-                 # Find the entity data corresponding to the selected iid
-                 for entity in entities:
-                     if entity.get('id') == iid:
-                         try:
-                             start_pos = f"{entity['start_line']}.{entity['start_char']}"
-                             end_pos = f"{entity['end_line']}.{entity['end_char']}"
-                             # Apply the selection tag (tk.SEL)
-                             self.text_area.tag_add(tk.SEL, start_pos, end_pos)
-                             # Store the position of the first entity found to scroll to it
-                             if first_entity_pos is None:
-                                 first_entity_pos = start_pos
-                         except (tk.TclError, KeyError, ValueError) as e:
-                             print(f"Warning: Error highlighting entity {iid}: {e}")
-                         break # Found the entity for this iid, move to next iid
+                # Find the specific entity data for this iid
+                entity_data = next((e for e in entities if e.get('id') == iid), None)
+                if entity_data:
+                    try:
+                        start_pos = f"{entity_data['start_line']}.{entity_data['start_char']}"
+                        end_pos = f"{entity_data['end_line']}.{entity_data['end_char']}"
+                        self.text_area.tag_add(tk.SEL, start_pos, end_pos)
+                        if first_entity_pos is None: first_entity_pos = start_pos
+                    except Exception as e: print(f"Warning: Error highlighting entity {iid}: {e}")
 
-            # Scroll the text area to make the first selected entity visible
+            # Scroll to first selected entity
             if first_entity_pos:
-                try:
-                    self.text_area.see(first_entity_pos)
-                except tk.TclError as e:
-                     print(f"Warning: Error scrolling to entity: {e}")
+                try: self.text_area.see(first_entity_pos)
+                except tk.TclError as e: print(f"Warning: Error scrolling to entity: {e}")
 
-        # Update button states based on the new selection count
-        self._update_button_states()
+        self._update_button_states() # Update buttons based on selection
 
 
-    # --- Relation Annotation ---
+    # --- Relation Annotation (Largely Unchanged) ---
     def add_relation(self):
         """Adds a relation between the two selected entities (Head -> Tail)."""
         if len(self.selected_entity_ids_for_relation) != 2:
-            messagebox.showerror("Selection Error", "Select exactly TWO entities from the list (Head first, then Tail).")
+            messagebox.showerror("Selection Error", "Select exactly TWO entities (Head first, then Tail).", parent=self.root)
             return
 
-        # Assume the first selected is Head, second is Tail based on selection order in Treeview
-        # Note: Treeview selection order isn't guaranteed across platforms/versions,
-        # but it's the common assumption here. A more robust UI might have separate Head/Tail selectors.
-        head_id = self.selected_entity_ids_for_relation[0]
-        tail_id = self.selected_entity_ids_for_relation[1]
-
+        head_id, tail_id = self.selected_entity_ids_for_relation[0], self.selected_entity_ids_for_relation[1]
         relation_type = self.selected_relation_type.get()
         if not relation_type:
-            messagebox.showerror("Selection Error", "Select a relation type.")
+            messagebox.showerror("Selection Error", "Select a relation type.", parent=self.root)
             return
-
         if not self.current_file_path or self.current_file_path not in self.annotations:
-            messagebox.showerror("Error", "Cannot add relation: No file/annotations loaded.")
+            messagebox.showerror("Error", "Cannot add relation: No file/annotations.", parent=self.root)
             return
 
         file_data = self.annotations.setdefault(self.current_file_path, {"entities": [], "relations": []})
         relations_list = file_data.setdefault("relations", [])
 
-        # Check for duplicates before adding
-        for rel in relations_list:
-             if rel.get('head_id') == head_id and rel.get('tail_id') == tail_id and rel.get('type') == relation_type:
-                 messagebox.showwarning("Duplicate Relation", "This exact relation (Head->Tail, Type) already exists.")
-                 return
-             # Optional: Check for inverse relation if symmetric relations are disallowed
-             # if relation_type in symmetric_types and rel.get('head_id') == tail_id and rel.get('tail_id') == head_id and rel.get('type') == relation_type:
-             #     messagebox.showwarning("Duplicate Relation", "The inverse of this symmetric relation already exists.")
-             #     return
+        # Check for duplicates
+        if any(r.get('head_id') == head_id and r.get('tail_id') == tail_id and r.get('type') == relation_type for r in relations_list):
+            messagebox.showwarning("Duplicate Relation", "This exact relation already exists.", parent=self.root)
+            return
 
-        # Generate unique ID for the relation
         relation_id = uuid.uuid4().hex
-        new_relation = {
-            "id": relation_id,
-            "type": relation_type,
-            "head_id": head_id,
-            "tail_id": tail_id
-        }
-
-        # Add to data structure
+        new_relation = {"id": relation_id, "type": relation_type, "head_id": head_id, "tail_id": tail_id}
         relations_list.append(new_relation)
-
-        # Update UI list
         self.update_relations_list()
 
-        # Select the new relation in the list
-        self.root.update_idletasks() # Ensure tree is updated
+        # Select new relation
+        self.root.update_idletasks()
         try:
             if self.relations_tree.exists(relation_id):
-                 self.relations_tree.selection_set(relation_id)
-                 self.relations_tree.focus(relation_id)
-                 self.relations_tree.see(relation_id)
-            else:
-                 print(f"Warning: New relation '{relation_id}' not found in tree after update.")
-        except Exception as e:
-             print(f"Error selecting new relation in tree: {e}")
+                self.relations_tree.selection_set(relation_id)
+                self.relations_tree.focus(relation_id)
+                self.relations_tree.see(relation_id)
+        except Exception as e: print(f"Error selecting new relation: {e}")
 
         self.status_var.set(f"Added Relation: {relation_type} ({head_id[:4]}... -> {tail_id[:4]}...)")
-        # No button state change expected just from adding a relation
 
-
-    # <<< NEW METHOD >>>
     def flip_selected_relation(self):
         """Flips the Head and Tail entities for the selected relation."""
         selected_iids = self.relations_tree.selection()
-        if len(selected_iids) != 1:
-            # This check is technically redundant due to button state, but good practice
-            messagebox.showerror("Selection Error", "Please select exactly ONE relation from the list to flip.")
-            return
+        if len(selected_iids) != 1: return # Should be disabled if not 1
 
         relation_id_to_flip = selected_iids[0]
+        relations = self.annotations.get(self.current_file_path, {}).get("relations")
+        if not relations: return # No relations to flip
 
-        # Check if file and relations data are loaded
-        if not self.current_file_path or \
-           not self.annotations.get(self.current_file_path, {}).get("relations"):
-            messagebox.showerror("Error", "Cannot flip relation: No file or relation data loaded.")
-            return
-
-        relations = self.annotations[self.current_file_path]["relations"]
         found = False
         for i, rel in enumerate(relations):
             if rel.get('id') == relation_id_to_flip:
-                # Found the relation, perform the flip in place
-                current_head = rel.get('head_id')
-                current_tail = rel.get('tail_id')
-                if current_head and current_tail: # Ensure both IDs exist
-                    # Swap the values in the data structure
-                    relations[i]['head_id'] = current_tail
-                    relations[i]['tail_id'] = current_head
+                current_head, current_tail = rel.get('head_id'), rel.get('tail_id')
+                if current_head and current_tail:
+                    relations[i]['head_id'], relations[i]['tail_id'] = current_tail, current_head # Swap
                     found = True
-                    break # Exit loop once found and flipped
+                    break
                 else:
-                    messagebox.showerror("Data Error", "Selected relation is missing Head or Tail ID.")
-                    return # Don't proceed if data is corrupt
+                    messagebox.showerror("Data Error", "Selected relation missing Head/Tail ID.", parent=self.root)
+                    return
 
         if found:
-            # Update the UI list display
             self.update_relations_list()
-            # Re-select the flipped relation for visual confirmation
+            # Re-select
             self.root.update_idletasks()
             try:
                 if self.relations_tree.exists(relation_id_to_flip):
                      self.relations_tree.selection_set(relation_id_to_flip)
                      self.relations_tree.focus(relation_id_to_flip)
                      self.relations_tree.see(relation_id_to_flip)
-            except Exception as e:
-                print(f"Warning: Error re-selecting flipped relation {relation_id_to_flip}: {e}")
-
-            # Update status bar
+            except Exception as e: print(f"Warning: Error re-selecting flipped relation: {e}")
             self.status_var.set("Relation Head/Tail flipped.")
-        else:
-            # Should be rare if button state is correct
-            messagebox.showwarning("Not Found", "Could not find the selected relation in the internal data.")
-
-        # Button states are updated by update_relations_list() -> _update_button_states()
+        # else: messagebox.showwarning("Not Found", "Could not find selected relation.", parent=self.root) # Should not happen
 
 
     def remove_relation_annotation(self):
         """Removes the selected relation from the Relations list."""
         selected_iids = self.relations_tree.selection()
-        # Button state logic should ensure only one is selected when this is called
-        if not selected_iids: # Safety check
-            messagebox.showinfo("Info", "Select a relation to remove.")
-            return
+        if len(selected_iids) != 1: return # Should be disabled if not 1
 
         relation_id_to_remove = selected_iids[0]
+        relations = self.annotations.get(self.current_file_path, {}).get("relations")
+        if not relations: return # No relations to remove
 
-        # Verify data exists
-        if not self.current_file_path or \
-           not self.annotations.get(self.current_file_path, {}).get("relations"):
-            messagebox.showerror("Error", "Cannot remove relation: No file/annotations loaded.")
-            return
+        original_length = len(relations)
+        self.annotations[self.current_file_path]["relations"] = [
+            rel for rel in relations if rel.get('id') != relation_id_to_remove
+        ]
 
-        relations = self.annotations[self.current_file_path]["relations"]
-        removed = False
-        new_relations_list = [] # Build a new list excluding the one to remove
-
-        for rel in relations:
-            if rel.get('id') == relation_id_to_remove:
-                removed = True
-                # Don't append this one to the new list
-            else:
-                new_relations_list.append(rel)
-
-        if removed:
-            # Update the data structure with the filtered list
-            self.annotations[self.current_file_path]["relations"] = new_relations_list
-            # Update the UI list
+        if len(self.annotations[self.current_file_path]["relations"]) < original_length:
             self.update_relations_list()
             self.status_var.set("Relation removed.")
-        else:
-             # Should be rare if selection/button state is correct
-             messagebox.showwarning("Not Found", "Could not find the selected relation to remove.")
-
-        # Button states are updated by update_relations_list() -> _update_button_states()
+        # else: messagebox.showwarning("Not Found", "Could not find selected relation.", parent=self.root) # Should not happen
 
 
     def update_relations_list(self):
         """Updates the Relations Treeview with relations for the current file."""
-        try:
-            self.relations_tree.delete(*self.relations_tree.get_children())
-        except Exception:
-            pass # Ignore if tree empty
+        try: self.relations_tree.delete(*self.relations_tree.get_children())
+        except Exception: pass
 
-        # Get current data safely
+        if not self.current_file_path: # Handle case where file loading failed or no file loaded
+            self._update_button_states()
+            return
+
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         relations = self.annotations.get(self.current_file_path, {}).get("relations", [])
 
         if not relations:
-            # No relations to display, ensure buttons are updated based on entity selection
-            self._update_button_states()
+            self._update_button_states() # Update buttons even if list is empty now
             return
 
-        # Create a quick lookup map from entity ID to its display text
-        entity_text_map = {}
-        if entities:
-            for entity in entities:
-                eid = entity.get('id')
-                etext = entity.get('text', 'N/A')
-                if eid:
-                    # Prepare a shortened, single-line version for the relation list
-                    display_text = etext.replace(os.linesep, ' ').replace('\n',' ').replace('\r','')[:30]
-                    if len(etext) > 30: display_text += "..."
-                    # Store the display text, potentially adding tag info
-                    # display_text += f" [{entity.get('tag','?')}]" # Optional: add tag
-                    entity_text_map[eid] = display_text
+        # Build lookup map from ALL entities in this file (needed for Head/Tail text)
+        # Crucially, handle merged entities: use the text from the *first* occurrence for display
+        entity_display_map = {}
+        processed_ids_for_map = set()
+        # Sort entities by position to ensure we get the first occurrence's text for merged IDs
+        sorted_entities_for_map = sorted(entities, key=lambda a: (a.get('start_line', 0), a.get('start_char', 0)))
+        for entity in sorted_entities_for_map:
+             eid = entity.get('id')
+             if eid and eid not in processed_ids_for_map:
+                  etext = entity.get('text', 'N/A')
+                  display_text = etext.replace(os.linesep, ' ').replace('\n',' ').replace('\r','')[:30]
+                  if len(etext) > 30: display_text += "..."
+                  # Optional: Add tag? display_text += f" [{entity.get('tag','?')}]"
+                  entity_display_map[eid] = display_text
+                  processed_ids_for_map.add(eid)
 
-        items_added = 0
-        # Sort relations before display (optional)
+
         sorted_relations = sorted(relations, key=lambda r: (r.get('type', ''), r.get('head_id','')))
 
         for rel in sorted_relations:
-            rel_id = rel.get('id')
-            head_id = rel.get('head_id')
-            tail_id = rel.get('tail_id')
-            rel_type = rel.get('type')
+            rel_id, head_id, tail_id, rel_type = rel.get('id'), rel.get('head_id'), rel.get('tail_id'), rel.get('type')
+            if not (rel_id and head_id and tail_id and rel_type): continue # Skip invalid
 
-            # Basic validation of the relation data
-            if not (rel_id and head_id and tail_id and rel_type):
-                print(f"Warning: Skipping invalid relation data in list update: {rel}")
-                continue
-
-            # Get display text for head and tail using the map
-            # Fallback to showing partial ID if entity not found (e.g., after deletion/merge error)
-            head_text = entity_text_map.get(head_id, f"<ID: {head_id[:6]}...>")
-            tail_text = entity_text_map.get(tail_id, f"<ID: {tail_id[:6]}...>")
-
-            # Prepare values tuple for treeview insertion (must match 'columns' definition)
-            # (Hidden ID, Displayed Head, Displayed Type, Displayed Tail)
+            head_text = entity_display_map.get(head_id, f"<ID: {head_id[:6]}...>")
+            tail_text = entity_display_map.get(tail_id, f"<ID: {tail_id[:6]}...>")
             values_to_insert = (rel_id, head_text, rel_type, tail_text)
 
-            try:
-                self.relations_tree.insert("", tk.END, iid=rel_id, values=values_to_insert)
-                items_added += 1
-            except Exception as e:
-                print(f"Error inserting relation {rel_id} into tree: {e}")
+            try: self.relations_tree.insert("", tk.END, iid=rel_id, values=values_to_insert)
+            except Exception as e: print(f"Error inserting relation {rel_id} into tree: {e}")
 
-        # Update button states after potentially changing the relation list
-        self._update_button_states()
-
+        self._update_button_states() # Update buttons after list refresh
 
     def on_relation_select(self, event):
         """Handles selection changes in the Relations Treeview."""
-        # The main purpose is to update button states (Flip/Remove depend on single selection)
+        # Primarily needed to update button states (Flip/Remove)
         self._update_button_states()
 
 
-    # --- Propagation (From Current File) ---
+    # --- Propagation (Unchanged Logic, added parent=self.root to messageboxes) ---
     def propagate_annotations(self):
         """Propagate ENTITY annotations from the *current* file to ALL files."""
         if not self.current_file_path or not self.files_list:
-            messagebox.showinfo("Info", "Load a directory first.")
+            messagebox.showinfo("Info", "Load a directory first.", parent=self.root)
             return
-
         source_entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         if not source_entities:
-            messagebox.showinfo("Info", "No entities in the current file to propagate.")
+            messagebox.showinfo("Info", "No entities in current file to propagate.", parent=self.root)
             return
-
-        # Create a dictionary of {text: tag} from the source entities
-        # Ignore entities with empty text or no tag
-        text_to_tag = {
-            ann['text']: ann['tag'] for ann in source_entities
-            if ann.get('text','').strip() and ann.get('tag')
-        }
-
+        text_to_tag = {ann['text']: ann['tag'] for ann in source_entities if ann.get('text','').strip() and ann.get('tag')}
         if not text_to_tag:
-            messagebox.showinfo("Info", "No valid entity text/tag pairs found in the current file to propagate.")
+            messagebox.showinfo("Info", "No valid text/tag pairs found to propagate.", parent=self.root)
             return
 
         confirm = messagebox.askyesno("Confirm Propagation (Current File)",
-            f"Search for text from entities in '{os.path.basename(self.current_file_path)}' "
-            f"across all {len(self.files_list)} files and apply tags?\n\n"
-            f"({len(text_to_tag)} unique text/tag pairs found).\n\n"
-            f"WARNING: This will add new annotations. Overlapping annotations will be skipped. "
-            f"Relations are NOT propagated."
-        )
+            f"Search for {len(text_to_tag)} text/tag pairs from '{os.path.basename(self.current_file_path)}' "
+            f"across all {len(self.files_list)} files?\n\n"
+            f"WARNING: Adds new annotations. Skips overlaps. Relations not propagated.", parent=self.root)
         if not confirm:
             self.status_var.set("Propagation cancelled.")
             return
-
-        # Call the common propagation logic
         self._perform_propagation(text_to_tag, "Current File Propagation")
 
-
-    # --- Dictionary Propagation ---
     def load_and_propagate_from_dictionary(self):
         """Loads a dictionary file and propagates entities based on it."""
         if not self.files_list:
-            messagebox.showerror("Error", "Open a directory first.")
+            messagebox.showerror("Error", "Open a directory first.", parent=self.root)
             return
-
         if not self.entity_tags:
-            messagebox.showwarning("Warning", "No entity tags defined in Settings. Add tags before using dictionary propagation.")
+            messagebox.showwarning("Warning", "No entity tags defined in Settings.", parent=self.root)
             return
 
         dict_path = filedialog.askopenfilename(
-            title="Select Dictionary File (TSV/TXT/Space-separated)",
-            filetypes=[("Text files", "*.txt"), ("TSV files", "*.tsv"), ("All files", "*.*")]
+            title="Select Dictionary File (Text<TAB/SPACE>Tag)",
+            filetypes=[("Text files", "*.txt"), ("TSV files", "*.tsv"), ("All files", "*.*")],
+            parent=self.root
         )
-        if not dict_path:
-            self.status_var.set("Dictionary loading cancelled.")
-            return
+        if not dict_path: return
 
-        # Read the dictionary file
-        dictionary_mapping = {} # {text: tag}
+        dictionary_mapping = {}
         lines_read, valid_entries, skipped_lines = 0, 0, 0
         invalid_tags_found = set()
         try:
@@ -1455,334 +1420,293 @@ class TextAnnotator:
                 for line_num, line in enumerate(f, 1):
                     lines_read += 1
                     line = line.strip()
-                    if not line or line.startswith('#'): # Skip empty lines and comments
-                         skipped_lines +=1; continue
+                    if not line or line.startswith('#'): skipped_lines +=1; continue
 
-                    # Try splitting by Tab first
                     parts = line.split('\t')
+                    if len(parts) != 2: parts = line.rsplit(maxsplit=1)
                     if len(parts) != 2:
-                        # If not 2 parts by Tab, try splitting by the LAST space
-                        # This handles multi-word entities like "New York City   Location"
-                        parts = line.rsplit(maxsplit=1) # Split only on the last whitespace block
-
-                    if len(parts) != 2:
-                        print(f"Warning: Skipping malformed dictionary line {line_num}: '{line}' (Expected 'Entity Text<TAB/SPACE>Tag')")
+                        print(f"Warning: Skipping malformed dict line {line_num}: '{line}'")
                         skipped_lines += 1; continue
 
                     entity_text, label = parts[0].strip(), parts[1].strip()
+                    if not entity_text: skipped_lines += 1; continue
 
-                    if not entity_text: # Skip if entity text is empty after stripping
-                        print(f"Warning: Skipping dictionary line {line_num} (empty entity text)")
-                        skipped_lines += 1; continue
-
-                    # Check if the label is a valid, currently defined entity tag
                     if label in self.entity_tags:
-                        # Add to dictionary (overwrite if text appears multiple times)
                         if entity_text in dictionary_mapping and dictionary_mapping[entity_text] != label:
-                             print(f"Warning: Dictionary line {line_num}: Text '{entity_text}' redefined from '{dictionary_mapping[entity_text]}' to '{label}'. Using last definition.")
+                            print(f"Warning: Dict line {line_num}: Text '{entity_text}' redefined tag. Using last.")
                         dictionary_mapping[entity_text] = label
-                        valid_entries += 1
+                        valid_entries += 1 # Count only when adding/overwriting valid entry
                     else:
-                        # Tag is not in the current list of entity tags
                         invalid_tags_found.add(label)
-                        # Don't increment valid_entries, but count as skipped
-                        skipped_lines += 1
+                        skipped_lines += 1 # Count as skipped if tag invalid
+            # Adjust valid count if overwrites happened (tricky without tracking adds vs overwrites)
+            # For simplicity, valid_entries counts lines processed with valid tags.
+            valid_entries = len(dictionary_mapping) # More accurate: final count of unique texts mapped
 
         except Exception as e:
-            messagebox.showerror("Dictionary Read Error", f"Failed to read dictionary file '{os.path.basename(dict_path)}':\n{e}")
+            messagebox.showerror("Dictionary Read Error", f"Failed to read dictionary:\n{e}", parent=self.root)
             return
 
-        # Report results of dictionary parsing
         if not dictionary_mapping:
-            msg = f"Finished reading dictionary '{os.path.basename(dict_path)}'.\n"
-            msg += f"Read {lines_read} lines. Found 0 valid entries.\n"
-            if invalid_tags_found:
-                 msg += f"Skipped lines due to unrecognized tags (e.g., {', '.join(list(invalid_tags_found)[:5])}{'...' if len(invalid_tags_found)>5 else ''}). "
-                 msg += f"Ensure these tags exist in 'Settings -> Manage Entity Tags'.\n"
-            if skipped_lines > len(invalid_tags_found):
-                 msg += f"Other lines skipped due to formatting issues or empty text."
-            messagebox.showinfo("Dictionary Parsing Results", msg)
-            return
+             msg = f"Finished reading dictionary '{os.path.basename(dict_path)}'.\n"
+             msg += f"Read {lines_read} lines. Found 0 valid entries.\n"
+             if invalid_tags_found: msg += f"Skipped lines due to unrecognized tags (e.g., {', '.join(list(invalid_tags_found)[:5])}...).\n"
+             if skipped_lines > len(invalid_tags_found): msg += f"Other lines skipped (formatting/empty)."
+             messagebox.showinfo("Dictionary Results", msg, parent=self.root)
+             return
 
-        # Confirm propagation with summary
         confirm_msg = f"Dictionary '{os.path.basename(dict_path)}' loaded.\n"
-        confirm_msg += f"- Read {lines_read} lines.\n"
-        confirm_msg += f"- Found {valid_entries} entries with valid tags.\n"
-        confirm_msg += f"- Skipped {skipped_lines} lines "
-        skipped_reasons = []
-        if invalid_tags_found: skipped_reasons.append("unrecognized tags")
-        if skipped_lines > len(invalid_tags_found): skipped_reasons.append("formatting/empty text")
-        if skipped_reasons: confirm_msg += f"({', '.join(skipped_reasons)})"
-        confirm_msg += ".\n"
+        confirm_msg += f"- Found {valid_entries} unique entries with valid tags.\n"
+        confirm_msg += f"- Read {lines_read} total lines (skipped {skipped_lines}).\n"
+        if invalid_tags_found: confirm_msg += f"- Example skipped tags: {', '.join(list(invalid_tags_found)[:5])}{'...' if len(invalid_tags_found)>5 else ''}\n"
+        confirm_msg += f"\nPropagate these {valid_entries} annotations across {len(self.files_list)} files?\n\n(Skips overlaps. Relations not affected.)"
 
-        if invalid_tags_found:
-             confirm_msg += f"- Example skipped tags: {', '.join(list(invalid_tags_found)[:5])}{'...' if len(invalid_tags_found)>5 else ''}\n"
-             confirm_msg += f"  (Ensure these exist in Settings -> Manage Entity Tags)\n"
-
-        confirm_msg += f"\nPropagate these {valid_entries} annotations across all {len(self.files_list)} files?\n\n"
-        confirm_msg += f"(Existing annotations will NOT be overwritten. Overlaps will be skipped. Relations are not affected.)"
-
-        confirm = messagebox.askyesno("Confirm Dictionary Propagation", confirm_msg)
+        confirm = messagebox.askyesno("Confirm Dictionary Propagation", confirm_msg, parent=self.root)
         if not confirm:
             self.status_var.set("Dictionary propagation cancelled.")
             return
-
-        # Call the common propagation logic
         self._perform_propagation(dictionary_mapping, "Dictionary Propagation")
 
-    # --- COMMON Propagation Logic ---
+
     def _perform_propagation(self, text_to_tag_map, source_description):
-        """Performs entity propagation across all files based on a text->tag map."""
-        propagated_count = 0 # Total new annotations added across all files
-        affected_files_count = 0 # Number of files that had at least one annotation added
-        extend_option = self.extend_to_word.get() # Checkbox state
-        current_file_was_modified = False # Track if the currently viewed file needs UI refresh
+        """COMMON entity propagation logic across all files."""
+        propagated_count = 0
+        affected_files_count = 0
+        extend_option = self.extend_to_word.get()
+        current_file_was_modified = False
 
         self.status_var.set(f"Starting {source_description}...")
-        self.root.update_idletasks() # Show status update immediately
+        self.root.update_idletasks()
 
-        # Sort keys by length descending - match longest entities first
-        # This helps prevent partial matches (e.g., matching "York" inside "New York")
         sorted_texts_to_find = sorted(text_to_tag_map.keys(), key=len, reverse=True)
 
-        # Iterate through each file in the loaded list
         for i, file_path in enumerate(self.files_list):
             file_modified_in_this_run = False
-            # Update status periodically
             if (i + 1) % 10 == 0 or i == len(self.files_list) - 1:
                 self.status_var.set(f"{source_description}: Processing file {i+1}/{len(self.files_list)}...")
                 self.root.update_idletasks()
 
-            try:
-                # Read file content
-                with open(file_path, 'r', encoding='utf-8') as f:
-                     content = f.read()
-                # Use splitlines to handle different line endings gracefully
-                lines = content.splitlines()
+            # Skip processing if file was reported missing during session load
+            if not os.path.isfile(file_path):
+                print(f"Info: Skipping propagation for missing file: {file_path}")
+                continue
 
-                # Get existing annotations for this file (or initialize if none)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f: content = f.read()
+                lines = content.splitlines() # Handles \n, \r, \r\n
+
                 file_data = self.annotations.setdefault(file_path, {"entities": [], "relations": []})
                 target_entities_list = file_data.setdefault("entities", [])
 
-                # Iterate through the texts to find from the map (longest first)
+                # Create temporary list of spans already annotated *in this file* to check against
+                # Store as (start_line, start_char, end_line, end_char) tuples for faster checking
+                existing_spans = set()
+                for ann in target_entities_list:
+                    if all(k in ann for k in ['start_line', 'start_char', 'end_line', 'end_char']):
+                         existing_spans.add((ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char']))
+
+
+                newly_added_spans_this_file = set() # Track spans added *during this propagation* for overlap checks
+
                 for text_to_find in sorted_texts_to_find:
                     tag_to_apply = text_to_tag_map[text_to_find]
-                    if len(text_to_find) < 1: continue # Skip empty strings
+                    if not text_to_find: continue # Skip empty
 
-                    # Search line by line
-                    for line_num, line in enumerate(lines, 1): # Use 1-based line numbers for tk.Text
-                        start_char_search = 0 # Start search from beginning of line
+                    for line_num, line in enumerate(lines, 1): # tk.Text uses 1-based lines
+                        start_char_search = 0
                         while True:
-                            # Find the next occurrence of the text in the current line
                             found_char_index = line.find(text_to_find, start_char_search)
-                            if found_char_index == -1:
-                                break # Not found in the rest of this line
+                            if found_char_index == -1: break # Not in rest of line
 
-                            # Calculate initial match boundaries (0-based for string indexing)
                             match_start_char = found_char_index
                             match_end_char = found_char_index + len(text_to_find)
-                            annotated_text = text_to_find # Text to store in annotation
+                            annotated_text = text_to_find
 
-                            # --- Optional: Extend to word boundaries ---
+                            # Extend to word boundaries if option checked
                             if extend_option:
                                 word_start_char, word_end_char = match_start_char, match_end_char
-                                # Extend backward if preceded by alphanumeric
-                                while word_start_char > 0 and line[word_start_char - 1].isalnum():
-                                     word_start_char -= 1
-                                # Extend forward if followed by alphanumeric
-                                while word_end_char < len(line) and line[word_end_char].isalnum():
-                                     word_end_char += 1
-
-                                # If extension occurred, update boundaries and text
+                                while word_start_char > 0 and line[word_start_char - 1].isalnum(): word_start_char -= 1
+                                while word_end_char < len(line) and line[word_end_char].isalnum(): word_end_char += 1
                                 if word_start_char != match_start_char or word_end_char != match_end_char:
-                                     match_start_char = word_start_char
-                                     match_end_char = word_end_char
-                                     annotated_text = line[match_start_char:match_end_char]
+                                    match_start_char = word_start_char
+                                    match_end_char = word_end_char
+                                    annotated_text = line[match_start_char:match_end_char]
 
+                            # Use numeric span for overlap check
+                            current_span = (line_num, match_start_char, line_num, match_end_char)
 
-                            # --- Check for Overlap ---
-                            # Check against entities already present OR added *during this propagation run* for this file
-                            # Use the potentially extended boundaries for the check
-                            overlap = self._is_overlapping_in_list(
-                                line_num, match_start_char, line_num, match_end_char,
-                                target_entities_list # Check against the current state of this file's entities
-                            )
+                            # Check overlap against BOTH pre-existing and newly added spans in *this file*
+                            overlap = False
+                            # Check against pre-existing
+                            for existing_span in existing_spans:
+                                if self._spans_overlap_numeric(*current_span, *existing_span):
+                                    overlap = True; break
+                            if overlap:
+                                start_char_search = match_end_char # Move past overlap
+                                continue # Skip this match
+                            # Check against newly added in this run
+                            for new_span in newly_added_spans_this_file:
+                                if self._spans_overlap_numeric(*current_span, *new_span):
+                                    overlap = True; break
 
-                            # --- Add Annotation if No Overlap ---
+                            # Add annotation if no overlap found
                             if not overlap:
                                 entity_id = uuid.uuid4().hex
                                 new_annotation = {
-                                    'id': entity_id,
-                                    'start_line': line_num,
-                                    'start_char': match_start_char,
-                                    'end_line': line_num, # Single line match for now
-                                    'end_char': match_end_char,
-                                    'text': annotated_text, # Use potentially extended text
-                                    'tag': tag_to_apply
+                                    'id': entity_id, 'start_line': line_num, 'start_char': match_start_char,
+                                    'end_line': line_num, 'end_char': match_end_char,
+                                    'text': annotated_text, 'tag': tag_to_apply
                                 }
-                                target_entities_list.append(new_annotation) # Add to this file's data
-                                propagated_count += 1 # Increment total count
-                                file_modified_in_this_run = True # Mark this file as changed
+                                target_entities_list.append(new_annotation)
+                                newly_added_spans_this_file.add(current_span) # Track added span
+                                propagated_count += 1
+                                file_modified_in_this_run = True
+                                if file_path == self.current_file_path: current_file_was_modified = True
 
-                                # Check if the modified file is the one currently displayed
-                                if file_path == self.current_file_path:
-                                    current_file_was_modified = True
-
-                            # --- Advance Search Position ---
-                            # Move search start past the end of the current match to avoid re-matching overlaps immediately
+                            # Advance search position past the *original* match end, or extended end?
+                            # Let's advance past the extended end to avoid issues if extension creates overlap possibility.
                             start_char_search = match_end_char
-                            # Safety break if search doesn't advance (e.g., finding empty string - though skipped earlier)
-                            if start_char_search <= found_char_index:
-                                 start_char_search = found_char_index + 1
+                            if start_char_search <= found_char_index: # Safety break
+                                start_char_search = found_char_index + 1
 
+            except Exception as e: print(f"ERROR processing file '{os.path.basename(file_path)}' during propagation:\n{str(e)}")
 
-                # After checking all texts for this file
-                if file_modified_in_this_run:
-                    affected_files_count += 1
+            if file_modified_in_this_run: affected_files_count += 1
 
-            except Exception as e:
-                 # Log errors encountered during processing a specific file
-                 print(f"ERROR processing file '{os.path.basename(file_path)}' during propagation:\n{str(e)}")
-                 # Optionally: messagebox.showerror(...) but might be too many popups
-
-        # --- Post-Propagation Updates ---
-
-        # If the currently viewed file was changed, update its UI elements
+        # Post-propagation updates
         if current_file_was_modified:
-            self.update_entities_list() # Refresh entity list (will show new merged tags if any)
-            self.apply_annotations_to_text() # Re-apply all highlights including new ones
+            self.update_entities_list()
+            self.apply_annotations_to_text()
+        self._update_button_states()
 
-        self._update_button_states() # Always update states after propagation run
-
-        # Show summary message box
-        summary = f"{source_description} complete.\n"
-        summary += f"Added {propagated_count} new entities across {affected_files_count} files."
+        summary = f"{source_description} complete.\nAdded {propagated_count} new entities across {affected_files_count} files."
         if extend_option: summary += "\n('Extend to whole word' was enabled)"
-        messagebox.showinfo("Propagation Results", summary)
+        messagebox.showinfo("Propagation Results", summary, parent=self.root)
         self.status_var.set(f"{source_description} finished. Added {propagated_count} entities.")
 
 
-    # --- Tag/Type Management ---
+
+    # --- Tag/Type Management (Unchanged logic, added parent=self.root to messageboxes) ---
     def _manage_items(self, item_type_name, current_items_list, update_combobox_func):
-        """Generic function to open a modal window for managing a list of items (tags/types)."""
-        # Create a Toplevel window (modal dialog)
+        """Generic modal window for managing tags/types."""
         window = tk.Toplevel(self.root)
         window.title(f"Manage {item_type_name}")
         window.geometry("350x400"); window.resizable(False, False)
-        window.transient(self.root); # Keep window on top of main app
-        window.grab_set() # Make window modal (block interaction with main app)
+        window.transient(self.root); window.grab_set()
 
-        # Frame for the listbox and scrollbar
-        list_frame = tk.Frame(window)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+        list_frame = tk.Frame(window); list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
         tk.Label(list_frame, text=f"Current {item_type_name}:").pack(anchor=tk.W)
         scrollbar = tk.Scrollbar(list_frame); scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Create a temporary list from the current items
-        temp_items = list(current_items_list) # Copy the list
-
-        # Listbox to display items
         listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False)
-        for item in temp_items:
-            listbox.insert(tk.END, item)
-            # Special handling for entity tags to show color
-            if item_type_name == "Entity Tags":
-                color = self.get_color_for_tag(item)
-                try:
-                    listbox.itemconfig(tk.END, {'bg': color})
-                except tk.TclError:
-                    pass # Ignore color setting errors
+
+        # Populate listbox with current items
+        for item in current_items_list:
+             listbox.insert(tk.END, item)
+             if item_type_name == "Entity Tags":
+                  color = self.get_color_for_tag(item)
+                  try: listbox.itemconfig(tk.END, {'bg': color})
+                  except: pass # Ignore color errors
+
         listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
 
-        # Frame for Add/Remove controls
-        controls_frame = tk.Frame(window)
-        controls_frame.pack(fill=tk.X, padx=10, pady=10)
-
-        item_var = tk.StringVar() # Variable for the entry field
+        controls_frame = tk.Frame(window); controls_frame.pack(fill=tk.X, padx=10, pady=10)
+        item_var = tk.StringVar()
         item_entry = tk.Entry(controls_frame, textvariable=item_var, width=20)
         item_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
         def add_item():
-            item = item_var.get().strip() # Get and clean input
-            if item: # Only add if not empty
-                # Check for duplicates (case-insensitive)
+            item = item_var.get().strip()
+            if item:
                 existing_lower = [listbox.get(i).lower() for i in range(listbox.size())]
                 if item.lower() not in existing_lower:
                     listbox.insert(tk.END, item)
-                    # Apply color if it's an entity tag
                     if item_type_name == "Entity Tags":
-                         color = self.get_color_for_tag(item)
-                         try: listbox.itemconfig(tk.END, {'bg': color})
-                         except tk.TclError: pass
-                    item_var.set("") # Clear entry field
-                    listbox.see(tk.END) # Scroll to the new item
-                else:
-                    messagebox.showwarning("Duplicate", f"'{item}' already exists (case-insensitive).", parent=window)
-            item_entry.focus_set() # Keep focus on entry
-
-        item_entry.bind("<Return>", lambda event: add_item()) # Add on Enter key
+                        color = self.get_color_for_tag(item) # Get/generate color
+                        try: listbox.itemconfig(tk.END, {'bg': color})
+                        except: pass
+                    item_var.set(""); listbox.see(tk.END)
+                else: messagebox.showwarning("Duplicate", f"'{item}' already exists.", parent=window)
+            item_entry.focus_set()
+        item_entry.bind("<Return>", lambda event: add_item())
 
         add_btn = tk.Button(controls_frame, text="Add", width=7, command=add_item)
         add_btn.pack(side=tk.LEFT, padx=5)
 
         def remove_item():
-            indices = listbox.curselection() # Get selected item indices
+            indices = listbox.curselection()
             if indices:
-                # Iterate in reverse to avoid index shifting issues
-                for index in reversed(indices):
-                    listbox.delete(index)
-            else:
-                messagebox.showwarning("No Selection", "Select an item to remove.", parent=window)
+                 # Prompt for confirmation if removing tags associated with existing annotations? (Complex)
+                 # For now, just remove. User is warned implicitly by potential loss of highlighting.
+                 for index in reversed(indices): listbox.delete(index)
+            else: messagebox.showwarning("No Selection", "Select item(s) to remove.", parent=window)
 
         remove_btn = tk.Button(controls_frame, text="Remove", width=7, command=remove_item)
         remove_btn.pack(side=tk.LEFT)
 
-        # Frame for Save/Cancel buttons
-        button_frame = tk.Frame(window)
-        button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        button_frame = tk.Frame(window); button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         def save_changes():
-            new_items = list(listbox.get(0, tk.END)) # Get updated list from listbox
-            # Basic validation: ensure at least one item remains (adjust if needed)
-            if not new_items:
-                 warning_msg = f"Cannot remove all {item_type_name}. At least one must remain."
-                 if item_type_name == "Entity Tags": warning_msg += "\nAnnotations using removed tags will lose highlighting."
-                 messagebox.showwarning("Warning", warning_msg, parent=window)
-                 return # Don't save if list is empty
+            new_items = list(listbox.get(0, tk.END))
+            # Prevent removing *all* items? Maybe allow it for relations, but not entities?
+            # Let's allow removing all for now, combobox update handles empty list.
+            # if not new_items:
+            #      messagebox.showwarning("Warning", f"Cannot remove all {item_type_name}.", parent=window)
+            #      return
 
-            # Check if changes were actually made
-            if new_items != current_items_list:
-                # --- Apply Changes ---
-                # 1. Update the main application's list IN PLACE
-                current_items_list[:] = new_items
+            if set(new_items) != set(current_items_list): # Check if set contents changed
+                 removed_items = set(current_items_list) - set(new_items)
+                 # --- Warning about existing annotations losing tags ---
+                 if item_type_name == "Entity Tags" and removed_items:
+                     # Check if any annotations actually use the tags being removed (across all files)
+                     tags_in_use = set()
+                     for data in self.annotations.values():
+                         for entity in data.get("entities", []):
+                             if entity.get('tag') in removed_items:
+                                 tags_in_use.add(entity['tag'])
+                     if tags_in_use:
+                         if not messagebox.askyesno("Confirm Tag Removal",
+                             f"You are removing tags that are currently used by annotations:\n"
+                             f"- {', '.join(list(tags_in_use))}\n\n"
+                             f"Annotations with these tags will remain but lose their highlighting and assigned tag.\n"
+                             f"Continue?", parent=window):
+                             return # User cancelled save
 
-                # 2. Update the corresponding Combobox
-                update_combobox_func()
+                 # Apply Changes
+                 current_items_list[:] = new_items # Update original list in place
+                 update_combobox_func() # Update the UI combobox
 
-                # 3. Perform additional updates if needed (e.g., for Entity Tags)
-                if item_type_name == "Entity Tags":
-                    # Reconfigure text area tags with potentially new colors/tags
-                    self._configure_text_tags()
-                    # Re-apply highlights in the text area based on the updated tags
-                    self.apply_annotations_to_text()
-                    # Re-render entity list (tag column might change)
-                    self.update_entities_list()
+                 if item_type_name == "Entity Tags":
+                      # Remove configurations for deleted tags
+                      for removed_tag in removed_items:
+                          try: self.text_area.tag_delete(removed_tag)
+                          except: pass # Ignore error if tag didn't exist
+                          if removed_tag in self.tag_colors: del self.tag_colors[removed_tag] # Remove color mapping
 
-                self.status_var.set(f"{item_type_name} updated.")
+                      # Ensure remaining/new tags are configured
+                      self._configure_text_tags()
+                      # Re-apply highlights (will skip removed tags) and update lists
+                      self.apply_annotations_to_text()
+                      self.update_entities_list() # Tag column might change for remaining entities
+                 elif item_type_name == "Relation Types":
+                      # If relation types are removed, update the relation list display
+                      # (though annotations themselves aren't deleted here)
+                      self.update_relations_list()
+
+
+                 self.status_var.set(f"{item_type_name} updated.")
             else:
-                self.status_var.set(f"No changes made to {item_type_name}.")
-
-            window.destroy() # Close the dialog
+                 self.status_var.set(f"No changes made to {item_type_name}.")
+            window.destroy()
 
         save_btn = tk.Button(button_frame, text="Save Changes", width=12, command=save_changes)
         save_btn.pack(side=tk.RIGHT, padx=5)
-
         cancel_btn = tk.Button(button_frame, text="Cancel", width=12, command=window.destroy)
         cancel_btn.pack(side=tk.RIGHT)
 
-        item_entry.focus_set() # Set initial focus to the entry field
-        window.wait_window() # Wait for the dialog to be closed
+        item_entry.focus_set()
+        window.wait_window()
+
 
     def manage_entity_tags(self):
         """Opens the modal window to manage entity tags."""
@@ -1792,11 +1716,21 @@ class TextAnnotator:
         """Opens the modal window to manage relation types."""
         self._manage_items("Relation Types", self.relation_types, self._update_relation_type_combobox)
 
+
 # --- Main Execution ---
 def main():
     root = tk.Tk()
-    style = ttk.Style()
-    style.theme_use('default') # or 'alt', 'default', 'classic'
+    # Optional: Apply a theme for a slightly more modern look if available
+    try:
+        style = ttk.Style()
+        # Check available themes: print(style.theme_names())
+        available_themes = style.theme_names()
+        if 'clam' in available_themes: style.theme_use('clam')
+        elif 'alt' in available_themes: style.theme_use('alt')
+        else: style.theme_use('default') # Fallback
+    except tk.TclError:
+        print("ttk themes not available or failed to set.") # Continue with default Tk look
+
     app = TextAnnotator(root)
     root.mainloop()
 
