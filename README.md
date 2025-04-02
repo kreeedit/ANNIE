@@ -154,6 +154,9 @@ ANNIE saves annotations in JSON format:
 - If a relation can't be created, ensure you've selected exactly two entities
 - Check that entity tags and relation types are defined before annotating
 
+## Version history
+- 0.55: Adding session save and load to ensure continous work on large datasets
+
 
 ## License
 
