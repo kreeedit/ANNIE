@@ -18,7 +18,7 @@ import itertools # For cycling through colors
 import re # For word boundary checking if needed
 
 # --- Constants ---
-SESSION_FILE_VERSION = "1.1" # Increment if session format changes significantly
+SESSION_FILE_VERSION = "1.3" # Anguelos recommendation and searching
 
 class TextAnnotator:
     """
@@ -54,6 +54,12 @@ class TextAnnotator:
 
         # --- UI State ---
         self.selected_entity_ids_for_relation = [] # Stores UUIDs from entities_tree
+
+        # --- Sort Tracking --- (new section)
+        self.entities_sort_column = None
+        self.entities_sort_reverse = False
+        self.relations_sort_column = None
+        self.relations_sort_reverse = False
 
         # --- Colors ---
         self.tag_colors = { # Default colors
@@ -121,7 +127,7 @@ class TextAnnotator:
 
         self.root.config(menu=menubar)
 
-    # --- UI Layout Creation (Unchanged from original, except potentially minor adjustments) ---
+    # --- UI Layout Creation ---
     def create_layout(self):
         """Creates the main GUI layout with all widgets."""
         # Main frame
@@ -240,16 +246,17 @@ class TextAnnotator:
             yscrollcommand=scrollbar_entities_y.set, selectmode='extended'
         )
         self.entities_tree.column("ID", width=0, stretch=False) # Hide ID column
-        self.entities_tree.heading("Start", text="Start")
-        self.entities_tree.heading("End", text="End")
-        self.entities_tree.heading("Text", text="Text")
-        self.entities_tree.heading("Tag", text="Tag")
+        self.entities_tree.heading("Start", text="Start", command=lambda: self._treeview_sort_column(self.entities_tree, "Start", False))
+        self.entities_tree.heading("End", text="End", command=lambda: self._treeview_sort_column(self.entities_tree, "End", False))
+        self.entities_tree.heading("Text", text="Text", command=lambda: self._treeview_sort_column(self.entities_tree, "Text", False))
+        self.entities_tree.heading("Tag", text="Tag", command=lambda: self._treeview_sort_column(self.entities_tree, "Tag", False))
         self.entities_tree.column("Start", width=70, anchor=tk.W, stretch=False)
         self.entities_tree.column("End", width=70, anchor=tk.W, stretch=False)
         self.entities_tree.column("Text", width=300, anchor=tk.W, stretch=True)
         self.entities_tree.column("Tag", width=100, anchor=tk.W, stretch=False)
         self.entities_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.entities_tree.bind("<<TreeviewSelect>>", self.on_entity_select)
+        self.entities_tree.bind("<Key>", lambda event: self._treeview_key_navigate(self.entities_tree, event))
         scrollbar_entities_y.config(command=self.entities_tree.yview)
 
         # Relations List Frame
@@ -265,17 +272,119 @@ class TextAnnotator:
             yscrollcommand=scrollbar_relations_y.set, selectmode='browse'
         )
         self.relations_tree.column("ID", width=0, stretch=False) # Hide ID column
-        self.relations_tree.heading("Head", text="Head Entity")
-        self.relations_tree.heading("Type", text="Relation Type")
-        self.relations_tree.heading("Tail", text="Tail Entity")
+        self.relations_tree.heading("Head", text="Head Entity", command=lambda: self._treeview_sort_column(self.relations_tree, "Head", False))
+        self.relations_tree.heading("Type", text="Relation Type", command=lambda: self._treeview_sort_column(self.relations_tree, "Type", False))
+        self.relations_tree.heading("Tail", text="Tail Entity", command=lambda: self._treeview_sort_column(self.relations_tree, "Tail", False))
         self.relations_tree.column("Head", width=250, anchor=tk.W, stretch=True)
         self.relations_tree.column("Type", width=120, anchor=tk.CENTER, stretch=False)
         self.relations_tree.column("Tail", width=250, anchor=tk.W, stretch=True)
         self.relations_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.relations_tree.bind("<<TreeviewSelect>>", self.on_relation_select)
+        self.entities_tree.bind("<Key>", lambda event: self._treeview_key_navigate(self.entities_tree, event))
         scrollbar_relations_y.config(command=self.relations_tree.yview)
 
-    # --- Color and Tag Configuration (Unchanged) ---
+    # Sort function:
+    def _treeview_sort_column(self, tree, col, reverse):
+        """Sorts a Treeview by the specified column."""
+        # Get the item IDs and their values in the given column
+        data = [(tree.set(item, col), item) for item in tree.get_children("")]
+
+        # Store current selection before sorting
+        selection = tree.selection()
+
+        # Perform the sort
+        data.sort(reverse=reverse)
+
+        # Move items in the tree according to sort order
+        for index, (val, item) in enumerate(data):
+            tree.move(item, "", index)
+
+        # Restore selection
+        if selection:
+            tree.selection_set(selection)
+            # Make first selected item visible
+            tree.see(selection[0])
+
+        # Update the header to show sort direction
+        # First reset all headers to remove previous indicators
+        tree_columns = tree["columns"]
+        for column in tree_columns:
+            if column != "ID":  # Skip the hidden ID column
+                tree.heading(column, text=column.replace("▲", "").replace("▼", ""))
+
+        # Update current sort column header
+        display_col = col.replace("▲", "").replace("▼", "")  # Remove any existing indicators
+        indicator = "▼" if reverse else "▲"
+        tree.heading(col, text=f"{display_col} {indicator}",
+                    command=lambda: self._treeview_sort_column(tree, col, not reverse))
+
+    # Improved _treeview_key_navigate function:
+    def _treeview_key_navigate(self, tree, event):
+        """Handles keyboard navigation in a Treeview to jump to items starting with pressed letter."""
+        # Get the character, ensure it's printable
+        if not event.char or not event.char.isprintable() or len(event.char) != 1:
+            return  # Let the event propagate for regular navigation keys
+
+        char = event.char.lower()
+
+        # Get all items
+        all_items = tree.get_children("")
+        if not all_items:
+            return  # Empty tree
+
+        # Get currently focused item index
+        focused_item = tree.focus()
+        current_idx = -1
+        if focused_item:
+            try:
+                current_idx = all_items.index(focused_item)
+            except ValueError:
+                current_idx = -1
+
+        # Determine which column to use for filtering (Text column for entities, Head for relations)
+        if tree == self.entities_tree:
+            match_column = "Text"
+        else:  # relations_tree
+            match_column = "Head"
+
+        # Start searching from the item after the current one
+        start_idx = (current_idx + 1) % len(all_items) if current_idx >= 0 else 0
+
+        # Search for an item starting with the pressed key
+        found_idx = None
+
+        # Search from current position to end
+        for i in range(start_idx, len(all_items)):
+            item_id = all_items[i]
+            item_text = str(tree.set(item_id, match_column)).lower()
+            if item_text.startswith(char):
+                found_idx = i
+                break
+
+        # If not found, wrap around to beginning
+        if found_idx is None:
+            for i in range(0, start_idx):
+                item_id = all_items[i]
+                item_text = str(tree.set(item_id, match_column)).lower()
+                if item_text.startswith(char):
+                    found_idx = i
+                    break
+
+        # If found, select and focus on it
+        if found_idx is not None:
+            found_item = all_items[found_idx]
+            tree.selection_set(found_item)
+            tree.focus(found_item)
+            tree.see(found_item)
+            # Trigger selection event programmatically
+            if tree == self.entities_tree:
+                self.on_entity_select(None)
+            else:
+                self.on_relation_select(None)
+            return "break"  # Stop event propagation
+
+
+    # --- Color and Tag Configuration ---
     def get_color_for_tag(self, tag):
         """Gets a color for a tag, generating one if not predefined."""
         if tag not in self.tag_colors:
@@ -341,7 +450,7 @@ class TextAnnotator:
                 self.selected_relation_type.set(current_selection)
             self.relation_type_combobox.config(state="readonly")
 
-    # --- Button State Management (Unchanged) ---
+    # --- Button State Management ---
     def _update_button_states(self):
         """Enable/disable buttons based on current application state."""
         file_loaded = bool(self.current_file_path)
@@ -428,8 +537,6 @@ class TextAnnotator:
             # No need to reload if it's the same file unless forced
             # print("Debug: Same file index selected, no reload.")
             return
-
-        # --- No need to check for unsaved changes here, as switching files within a session is expected ---
 
         # Clear views *before* loading new content
         self.clear_views() # Clears text, treeviews, selection state
@@ -715,7 +822,7 @@ class TextAnnotator:
             messagebox.showerror("Load Session Error", "Session file contains data with incorrect types.", parent=self.root)
             return
 
-        # Version check (optional but good practice)
+        # Version check
         loaded_version = session_data.get("version", "0.0")
         # Example: if loaded_version < "1.0": messagebox.showwarning(...)
         # print(f"Loading session version: {loaded_version}") # For debug
@@ -830,8 +937,8 @@ class TextAnnotator:
             self.root.quit()
 
 
-    # --- Entity Annotation (Largely Unchanged) ---
-    # Helper functions _spans_overlap_numeric, _is_overlapping_in_list, _is_overlapping_current_file (Unchanged)
+    # --- Entity Annotation ---
+    # Helper functions _spans_overlap_numeric, _is_overlapping_in_list, _is_overlapping_current_file
     def _spans_overlap_numeric(self, start1_line, start1_char, end1_line, end1_char,
                              start2_line, start2_char, end2_line, end2_char):
         """Checks if two spans, defined by line/char numbers, overlap."""
@@ -1223,7 +1330,7 @@ class TextAnnotator:
         self._update_button_states() # Update buttons based on selection
 
 
-    # --- Relation Annotation (Largely Unchanged) ---
+    # --- Relation Annotation ---
     def add_relation(self):
         """Adds a relation between the two selected entities (Head -> Tail)."""
         if len(self.selected_entity_ids_for_relation) != 2:
@@ -1573,7 +1680,7 @@ class TextAnnotator:
 
             if file_modified_in_this_run: affected_files_count += 1
 
-        # Post-propagation updates
+        # Post-propagation
         if current_file_was_modified:
             self.update_entities_list()
             self.apply_annotations_to_text()
@@ -1586,7 +1693,7 @@ class TextAnnotator:
 
 
 
-    # --- Tag/Type Management (Unchanged logic, added parent=self.root to messageboxes) ---
+    # --- Tag/Type Management ---
     def _manage_items(self, item_type_name, current_items_list, update_combobox_func):
         """Generic modal window for managing tags/types."""
         window = tk.Toplevel(self.root)
