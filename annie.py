@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 import uuid  # For unique IDs
 import itertools # For cycling through colors
-import re # For word boundary checking if needed
+import re
 
 # --- Constants ---
 SESSION_FILE_VERSION = "1.7" # Incremented version for read-only text area
