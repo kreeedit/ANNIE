@@ -156,6 +156,10 @@ ANNIE saves annotations in JSON format:
 
 ## Version history
 - 0.55: Adding session save and load to ensure continous work on large datasets
+- 0.60: Search entites, sorting function
+- 0.65: Propagated entites flagged to help differntate them
+- 0.70: Text area is immutable
+- 0.75: Double click and highlighting to make annotation faster
 
 
 ## License
