@@ -163,6 +163,23 @@ ANNIE saves annotations in JSON format:
 - 0.70: Text area is immutable
 - 0.75: Double click and highlighting to make annotation faster
 
+## Cite
+
+### APA Style
+Kovács, T. (2025). *ANNIE - Annotation Interface for Named-entity & Information Extraction* (Version 0.75) [Computer software]. GitHub. https://github.com/kreeedit/ANNIE
+
+### BibTex
+```bibtex
+@software{Kovacs_ANNIE_2025,
+  author = {Kovács, Tamás},
+  title = {{ANNIE - Annotation Interface for Named-entity & Information Extraction}},
+  version = {0.75},
+  publisher = {Zenodo},
+  year = {2025},
+  doi = {10.5281/zenodo.15805548},
+  url = {https://github.com/kreeedit/ANNIE}
+}
+```
 
 ## License
 
