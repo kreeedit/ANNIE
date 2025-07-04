@@ -166,13 +166,13 @@ ANNIE saves annotations in JSON format:
 ## Cite
 
 ### APA Style
-Kovács, T. (2025). *ANNIE - Annotation Interface for Named-entity & Information Extraction* (Version 0.75) [Computer software]. GitHub. https://github.com/kreeedit/ANNIE
+Kovács, T. (2025). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 0.75) [Computer software]. GitHub. https://github.com/kreeedit/ANNIE
 
 ### BibTex
 ```bibtex
 @software{Kovacs_ANNIE_2025,
   author = {Kovács, Tamás},
-  title = {{ANNIE - Annotation Interface for Named-entity & Information Extraction}},
+  title = {{ANNIE: Annotation Interface for Named-entity & Information Extraction}},
   version = {0.75},
   publisher = {Zenodo},
   year = {2025},
