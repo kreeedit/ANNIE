@@ -1124,45 +1124,26 @@ class TextAnnotator:
                 if needs_re_disable: self.text_area.config(state=tk.DISABLED)
                 return
 
-            selected_text = self.text_area.get(start_pos, end_pos)
-            adj_start_pos, adj_end_pos = start_pos, end_pos
-            adj_selected_text = selected_text # Initialize with original
+            # --- NEW: Snap the selection to whole word boundaries ---
+            # This replaces the old, complex whitespace stripping logic.
+            adj_start_pos = self.text_area.index(f"{start_pos} wordstart")
+            # To get the proper end, we find the wordend of the character just before the cursor
+            adj_end_pos = self.text_area.index(f"{self.text_area.index(f'{end_pos}-1c')} wordend")
 
-            leading_whitespace = len(selected_text) - len(selected_text.lstrip())
-            trailing_whitespace = len(selected_text) - len(selected_text.rstrip())
-
-            if leading_whitespace > 0:
-                adj_start_pos = self.text_area.index(f"{start_pos}+{leading_whitespace}c")
-            if trailing_whitespace > 0:
-                adj_end_pos = self.text_area.index(f"{end_pos}-{trailing_whitespace}c")
-
-            if leading_whitespace > 0 or trailing_whitespace > 0: # If adjustments were made
-                if self.text_area.compare(adj_start_pos, ">=", adj_end_pos): # Invalid span after adjustment
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return
-                try:
-                    adj_selected_text = self.text_area.get(adj_start_pos, adj_end_pos)
-                except tk.TclError: # Should not happen if compare check passed
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return
-                if not adj_selected_text.strip(): # All whitespace after adjustment
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return
-            # If no adjustments, adj_selected_text remains selected_text
-
-            try:
-                start_line, start_char = map(int, adj_start_pos.split('.'))
-                end_line, end_char = map(int, adj_end_pos.split('.'))
-            except ValueError:
-                print(f"Error parsing adjusted positions: {adj_start_pos} / {adj_end_pos}")
+            # If snapping resulted in an invalid range, abort.
+            if self.text_area.compare(adj_start_pos, ">=", adj_end_pos):
                 if needs_re_disable: self.text_area.config(state=tk.DISABLED)
                 return
 
-            final_text = adj_selected_text.strip()
-            if not final_text: # Final check after stripping
+            final_text = self.text_area.get(adj_start_pos, adj_end_pos)
+            if not final_text.strip(): # Ignore if selection is only whitespace
                 if needs_re_disable: self.text_area.config(state=tk.DISABLED)
                 return
 
+            # --- End of new logic ---
+
+            start_line, start_char = map(int, adj_start_pos.split('.'))
+            end_line, end_char = map(int, adj_end_pos.split('.'))
             tag = self.selected_entity_tag.get()
             if not tag:
                 messagebox.showwarning("Warning", "No entity tag selected.", parent=self.root)
@@ -1171,68 +1152,35 @@ class TextAnnotator:
 
             entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
 
-            # Conditional overlap/duplicate checking
+            # Conditional overlap/duplicate checking (this logic is preserved)
             if not self.allow_multilabel_overlap.get():
-                exact_adjusted_span_exists_with_same_tag = False
                 problematic_overlap_entity = None
                 for existing_ann in entities_in_file:
-                    ex_sl, ex_sc = existing_ann.get('start_line'), existing_ann.get('start_char')
-                    ex_el, ex_ec = existing_ann.get('end_line'), existing_ann.get('end_char')
-                    ex_tag = existing_ann.get('tag')
-                    if None not in [ex_sl, ex_sc, ex_el, ex_ec, ex_tag]: # Ensure all parts exist
-                        # Check for exact same span and tag
-                        if (start_line == ex_sl and start_char == ex_sc and
-                            end_line == ex_el and end_char == ex_ec and tag == ex_tag):
-                            exact_adjusted_span_exists_with_same_tag = True
-                            break # Found exact match with same tag, no need to check further overlaps
-                        # If not an exact match with same tag, check for any other kind of overlap
-                        if self._is_overlapping_in_list(start_line, start_char, end_line, end_char, [existing_ann]): # Check against this one entity
-                            problematic_overlap_entity = existing_ann
-                            # Don't break here; an exact match (handled above) is a more specific reason to stop.
-                            # If an exact match isn't found, this problematic_overlap_entity will be used.
-
-                if exact_adjusted_span_exists_with_same_tag:
-                    self.status_var.set("Annotation for this exact span and tag already exists.")
-                    try: self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-                    except tk.TclError: pass
-                    # Restore state and return
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return
-
-                if problematic_overlap_entity : # (and not exact_adjusted_span_exists_with_same_tag)
+                    if self._is_overlapping_in_list(start_line, start_char, end_line, end_char, [existing_ann]):
+                        problematic_overlap_entity = existing_ann
+                        break
+                if problematic_overlap_entity:
                     messagebox.showwarning("Overlap Detected",
-                                        f"Proposed annotation span:\n"
-                                        f"'{final_text}' ({adj_start_pos} -> {adj_end_pos})\n\n"
-                                        f"Overlaps with an existing entity:\n"
-                                        f"'{problematic_overlap_entity.get('text', '')}' ({problematic_overlap_entity.get('tag', '')})\n"
-                                        f"({problematic_overlap_entity.get('start_line')}.{problematic_overlap_entity.get('start_char')} -> {problematic_overlap_entity.get('end_line')}.{problematic_overlap_entity.get('end_char')})\n\n"
-                                        f"Enable 'Allow Multi-label & Overlapping Annotations' in Settings to permit this.",
-                                        parent=self.root)
-                    try: self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-                    except tk.TclError: pass
-                    # Restore state and return
+                        f"Proposed annotation '{final_text[:30]}...' overlaps with an existing one.\n\nEnable 'Allow Multi-label & Overlapping Annotations' in Settings to permit this.",
+                        parent=self.root)
                     if needs_re_disable: self.text_area.config(state=tk.DISABLED)
                     return
-            else: # allow_multilabel_overlap IS True
-                # Prevent adding an *absolutely identical* annotation (same span AND same tag)
+            else:
                 is_absolute_duplicate = False
                 for existing_ann in entities_in_file:
                     if (existing_ann.get('start_line') == start_line and
                         existing_ann.get('start_char') == start_char and
                         existing_ann.get('end_line') == end_line and
                         existing_ann.get('end_char') == end_char and
-                        existing_ann.get('tag') == tag): # Text is derived from span, so check is redundant
+                        existing_ann.get('tag') == tag):
                         is_absolute_duplicate = True
                         break
                 if is_absolute_duplicate:
                     self.status_var.set(f"This exact annotation (span and tag '{tag}') already exists.")
-                    try: self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-                    except tk.TclError: pass
-                    # Restore state and return
                     if needs_re_disable: self.text_area.config(state=tk.DISABLED)
                     return
 
-            # If all checks pass (or were appropriately bypassed), proceed to add annotation
+            # If all checks pass, proceed to add annotation
             file_data = self.annotations.setdefault(self.current_file_path, {"entities": [], "relations": []})
             entities_list = file_data.setdefault("entities", [])
             entity_id = uuid.uuid4().hex
@@ -1241,59 +1189,49 @@ class TextAnnotator:
             entities_list.append(annotation)
 
             try:
-                self.text_area.tag_remove(tk.SEL, "1.0", tk.END) # Clear user's visual selection
+                self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
             except tk.TclError:
                 pass
 
             self.apply_annotations_to_text()
             self.update_entities_list()
+            self.root.update_idletasks()
 
-            self.root.update_idletasks() # Allow UI to update before searching tree
+            # Try to find and select the new annotation in the tree view
             try:
                 new_tree_row_iid = None
-                # Treeview item values are (entity_id, start_pos_str, end_pos_str, disp_text, tag)
-                # We need to find the specific instance just added.
-                # Search for the item with the matching unique ID and start/end pos string and tag
                 for tree_iid_candidate in self._entity_id_to_tree_iids.get(entity_id, []):
                     if self.entities_tree.exists(tree_iid_candidate):
                         item_values = self.entities_tree.item(tree_iid_candidate, 'values')
                         if (item_values and len(item_values) == 5 and
                             item_values[0] == entity_id and
-                            item_values[1] == adj_start_pos and # adj_start_pos is string "line.char"
-                            item_values[2] == adj_end_pos and   # adj_end_pos is string "line.char"
-                            item_values[4] == tag):             # Ensure the tag also matches
+                            item_values[1] == adj_start_pos and
+                            item_values[2] == adj_end_pos and
+                            item_values[4] == tag):
                             new_tree_row_iid = tree_iid_candidate
                             break
-
-                if new_tree_row_iid and self.entities_tree.exists(new_tree_row_iid):
+                if new_tree_row_iid:
                     self.entities_tree.selection_set(new_tree_row_iid)
                     self.entities_tree.focus(new_tree_row_iid)
                     self.entities_tree.see(new_tree_row_iid)
-                    self.on_entity_select(None) # Trigger highlight update based on selection
-                else:
-                     print(f"Warning: Could not find/select treeview row for new entity {entity_id} at {adj_start_pos} with tag {tag}")
+                    self.on_entity_select(None)
             except Exception as e:
                 print(f"Error selecting new entity in list: {e}")
 
             self.status_var.set(f"Annotated: '{final_text[:30].replace(os.linesep, ' ')}...' as {tag}")
             self._update_button_states()
 
-        except tk.TclError as e:
-            if "text doesn't contain selection" in str(e).lower():
-                pass # This can happen if the selection is lost (e.g. window loses focus)
-            elif "bad text index" in str(e).lower():
-                print(f"Warning: Bad text index during annotation: {e}")
-            else:
-                messagebox.showerror("Annotation Error", f"Tkinter error:\n{e}", parent=self.root)
+        except tk.TclError:
+            # This can happen if no selection exists when the function is called
+            pass
         except Exception as e:
-            messagebox.showerror("Annotation Error", f"Unexpected error during annotation:\n{e}", parent=self.root)
+            messagebox.showerror("Annotation Error", f"An unexpected error occurred during annotation:\n{e}", parent=self.root)
             traceback.print_exc()
         finally:
             # Restore original state if it was changed and widget exists
-            if self.text_area.winfo_exists():
-                if needs_re_disable and self.text_area.cget('state') == tk.NORMAL:
-                    try: self.text_area.config(state=tk.DISABLED)
-                    except tk.TclError: pass # Ignore error if cannot disable
+            if self.text_area.winfo_exists() and needs_re_disable:
+                try: self.text_area.config(state=tk.DISABLED)
+                except tk.TclError: pass
 
     def remove_entity_annotation(self):
         selected_tree_iids = self.entities_tree.selection()
