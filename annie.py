@@ -24,6 +24,8 @@ import uuid  # For unique IDs
 import itertools # For cycling through colors
 import re
 import traceback # For more detailed error printing
+import time
+
 
 # --- Constants ---
 SESSION_FILE_VERSION = "1.11"
@@ -61,6 +63,8 @@ class TextAnnotator:
         # --- UI State ---
         self.selected_entity_ids_for_relation = []
         self._entity_id_to_tree_iids = {}
+        self._click_time = 0
+        self._click_pos = (0, 0)
 
         # --- Sort Tracking ---
         self.entities_sort_column = None
@@ -95,13 +99,37 @@ class TextAnnotator:
         self._configure_treeview_tags()
         self._update_button_states()
 
-        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        # --- Bind Hotkeys ---
+        for i in range(10): # Binds keys 0-9
+            self.root.bind(str(i), self._on_hotkey_press)
 
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _ensure_default_colors(self):
         for tag in self.entity_tags:
             self.get_color_for_tag(tag)
 
+    def _on_mouse_down(self, event):
+        """Records the time and position of a mouse press."""
+        self._click_time = time.time()
+        self._click_pos = (event.x, event.y)
+
+    def _on_hotkey_press(self, event):
+        """Handles number key presses to select an entity tag."""
+        try:
+            # The key '1' corresponds to index 0, '2' to 1, ..., '9' to 8, and '0' to 9.
+            key_num = int(event.keysym)
+            tag_index = (key_num - 1) % 10
+
+            # Check if the corresponding tag exists
+            if 0 <= tag_index < len(self.entity_tags):
+                selected_tag = self.entity_tags[tag_index]
+                self.selected_entity_tag.set(selected_tag)
+                self.status_var.set(f"Selected Tag: {selected_tag}")
+                return "break" # Prevents the key press from propagating further
+        except (ValueError, IndexError):
+            # Key pressed was not a number or tag doesn't exist. Do nothing.
+            pass
 
     def create_menu(self):
         menubar = tk.Menu(self.root)
@@ -183,8 +211,8 @@ class TextAnnotator:
         scrollbar_text_x.config(command=self.text_area.xview)
 
         self.text_area.bind("<Double-Button-1>", self._on_double_click)
+        self.text_area.bind("<ButtonPress-1>", self._on_mouse_down)
         self.text_area.bind("<ButtonRelease-1>", self._on_highlight_release)
-        self.text_area.bind("<Button-1>", self._on_single_click)
         self.text_area.bind("<Button-3>", self._on_text_right_click)
         self.text_area.bind("<Button-2>", self._on_text_right_click)
 
@@ -462,55 +490,59 @@ class TextAnnotator:
 
 
     def _on_highlight_release(self, event):
-        if not self.current_file_path or not self.entity_tags:
-            return
-        original_state = self.text_area.cget('state')
-        if original_state == tk.DISABLED: # Must be normal to read selection
-            try: self.text_area.config(state=tk.NORMAL)
-            except tk.TclError: return # Cannot proceed
-        try:
-            if self.text_area.tag_ranges(tk.SEL): # Check if a selection exists
-                sel_start = self.text_area.index(tk.SEL_FIRST)
-                sel_end = self.text_area.index(tk.SEL_LAST)
-                if sel_start != sel_end: # Actual drag-selection, not just a click
-                    self.annotate_selection()
-        except tk.TclError as e: # SEL_FIRST/LAST can fail if no selection
-            if "text doesn't contain selection" not in str(e).lower():
-                print(f"Warning: Highlight release error: {e}")
-        except Exception as e:
-            print(f"Error during highlight release annotation: {e}")
-        finally:
-            if self.text_area.winfo_exists() and original_state == tk.DISABLED: # Only re-disable if we enabled it
-                 try: self.text_area.config(state=tk.DISABLED)
-                 except tk.TclError: pass
-
-
-    def _on_single_click(self, event):
+        """
+        Handles both creating annotations on drag-release and removing them on a simple click.
+        Distinguishes a click from a drag using time and distance thresholds.
+        """
         if not self.current_file_path:
             return
+
+        # --- Define thresholds for what constitutes a "click" ---
+        CLICK_TIME_THRESHOLD = 0.5  # seconds
+        CLICK_MOVE_THRESHOLD = 10    # pixels
+
+        time_diff = time.time() - self._click_time
+        move_diff = abs(event.x - self._click_pos[0]) + abs(event.y - self._click_pos[1])
+
+        # --- Logic for creating a new annotation via highlighting ---
         try:
-            click_index_str = self.text_area.index(f"@{event.x},{event.y}")
-            click_line, click_char = map(int, click_index_str.split('.'))
-            click_pos = (click_line, click_char)
-            clicked_entity_dict = None
-            entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
-            # Iterate to find which annotation was clicked. If multiple overlap,
-            # this finds one of them (often the "topmost" visually, depending on draw order).
-            for entity in reversed(entities): # Reversed might find "topmost" if applied in order
-                start_l, start_c = entity.get('start_line'), entity.get('start_char')
-                end_l, end_c = entity.get('end_line'), entity.get('end_char')
-                if None in [start_l, start_c, end_l, end_c]: continue
-                span_start = (start_l, start_c)
-                span_end = (end_l, end_c)
-                if span_start <= click_pos < span_end:
-                    clicked_entity_dict = entity
-                    break
-            if clicked_entity_dict:
-                self._remove_entity_instance(clicked_entity_dict)
-                return "break" # Prevent default text widget behavior like cursor placement
-        except tk.TclError: pass # Clicked outside text area content
-        except Exception as e:
-            print(f"Error during single-click check: {e}")
+            sel_start = self.text_area.index(tk.SEL_FIRST)
+            sel_end = self.text_area.index(tk.SEL_LAST)
+            # If there's a real selection (a drag), annotate it.
+            if sel_start != sel_end:
+                self.annotate_selection()
+                return # Annotation handled, so we are done.
+        except tk.TclError:
+            # This is expected if there was no drag-selection.
+            pass
+
+        # --- Logic for removing an existing annotation on a quick click ---
+        if time_diff < CLICK_TIME_THRESHOLD and move_diff < CLICK_MOVE_THRESHOLD:
+            try:
+                click_index_str = self.text_area.index(f"@{event.x},{event.y}")
+                click_line, click_char = map(int, click_index_str.split('.'))
+                click_pos = (click_line, click_char)
+
+                clicked_entity_dict = None
+                entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
+
+                # Iterate reversed to find the "topmost" annotation if they overlap
+                for entity in reversed(entities):
+                    start_l, start_c = entity.get('start_line'), entity.get('start_char')
+                    end_l, end_c = entity.get('end_line'), entity.get('end_char')
+                    if None in [start_l, start_c, end_l, end_c]: continue
+
+                    if (start_l, start_c) <= click_pos < (end_l, end_c):
+                        clicked_entity_dict = entity
+                        break
+
+                if clicked_entity_dict:
+                    self._remove_entity_instance(clicked_entity_dict)
+
+            except tk.TclError: # Clicked outside text area content
+                pass
+            except Exception as e:
+                print(f"Error during single-click check: {e}")
 
 
     def _remove_entity_instance(self, entity_to_remove):
@@ -2020,8 +2052,13 @@ class TextAnnotator:
         scrollbar = tk.Scrollbar(list_frame); scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False, selectmode=tk.EXTENDED)
         current_items_list.sort(key=str.lower)
-        for item in current_items_list:
-            listbox.insert(tk.END, item)
+        for index, item in enumerate(current_items_list):
+            display_text = item
+            # Add hotkey numbers 1-9, 0 to the first 10 entity tags
+            if item_type_name == "Entity Tags" and index < 10:
+                hotkey_num = (index + 1) % 10
+                display_text = f"{hotkey_num}: {item}"
+                listbox.insert(tk.END, display_text)
             if item_type_name == "Entity Tags":
                 try: listbox.itemconfig(tk.END, {'bg': self.get_color_for_tag(item)})
                 except tk.TclError: pass
@@ -2071,6 +2108,9 @@ class TextAnnotator:
         button_frame = tk.Frame(window); button_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
         def save_changes():
             new_items = list(listbox.get(0, tk.END))
+            if item_type_name == "Entity Tags":
+                # Strip the "1: " prefix before saving
+                new_items = [re.sub(r"^\d:\s", "", item) for item in new_items]
             if set(new_items) != set(current_items_list):
                 removed = set(current_items_list) - set(new_items)
                 added = set(new_items) - set(current_items_list)
