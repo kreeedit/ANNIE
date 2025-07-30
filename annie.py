@@ -1926,6 +1926,21 @@ class TextAnnotator:
                         while True:
                             found_pos_str = temp_text_widget.search(text_to_find, start_index, stopindex=tk.END, exact=True, nocase=False)
                             if not found_pos_str: break
+                            # Validate that the match is a whole word
+                            is_start_boundary = (found_pos_str == "1.0") or \
+                                (not temp_text_widget.get(f"{found_pos_str}-1c").isalnum())
+
+                            end_of_match_idx = temp_text_widget.index(f"{found_pos_str}+{len(text_to_find)}c")
+                            is_end_boundary = False
+                            try:
+                                is_end_boundary = not temp_text_widget.get(end_of_match_idx).isalnum()
+                            except tk.TclError:
+                                is_end_boundary = True # End of text is a valid boundary
+
+                            # If not a whole word, skip to the next search
+                            if not (is_start_boundary and is_end_boundary):
+                                start_index = temp_text_widget.index(f"{found_pos_str}+1c")
+                                continue
                             initial_end_pos_str = temp_text_widget.index(f"{found_pos_str}+{len(text_to_find)}c")
                             current_match_start_pos, current_match_end_pos = found_pos_str, initial_end_pos_str
                             if extend_option:
