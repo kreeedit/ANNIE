@@ -1,5 +1,7 @@
 # ANNIE - Annotation Interface for Named-entity &amp; Information Extraction
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 ANNIE is a lightweight desktop application that provides a user-friendly interface for annotating text files with entities and relations. It's designed to help researchers, linguists, and NLP practitioners create high-quality annotated datasets for named entity recognition (NER) and relation extraction tasks.
 
 <p align="center">
@@ -161,6 +163,23 @@ ANNIE saves annotations in JSON format:
 - 0.70: Text area is immutable
 - 0.75: Double click and highlighting to make annotation faster
 
+## Cite
+
+### APA Style
+Kovács, T. (2025). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 0.75) [Computer software]. GitHub. https://github.com/kreeedit/ANNIE
+
+### BibTex
+```bibtex
+@software{Kovacs_ANNIE_2025,
+  author = {Kovács, Tamás},
+  title = {{ANNIE: Annotation Interface for Named-entity & Information Extraction}},
+  version = {0.75},
+  publisher = {Zenodo},
+  year = {2025},
+  doi = {10.5281/zenodo.15805548},
+  url = {https://github.com/kreeedit/ANNIE}
+}
+```
 
 ## License
 
