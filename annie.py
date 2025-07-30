@@ -1565,7 +1565,7 @@ class TextAnnotator:
             # This helps with visual layering if desired, though Tkinter's last-applied tag "wins" for bg.
             sorted_entities = sorted(entities, key=lambda a: (
                 a.get('start_line', 0), a.get('start_char', 0),
-                a.get('end_line', 0), a.get('end_char', 0) # Shorter spans drawn first for same start
+                -a.get('end_line', 0), -a.get('end_char', 0) # Shorter spans drawn first for same start
             ))
             for ann in sorted_entities:
                 try:
@@ -1577,6 +1577,7 @@ class TextAnnotator:
                         if tag not in self.text_area.tag_names(): self._configure_text_tags() # Reconfigure if somehow missing
 
                         if tag in self.text_area.tag_names(): # Check again
+                            self.text_area.tag_raise(tag)
                             self.text_area.tag_add(tag, start_pos, end_pos)
                             if is_propagated:
                                 try:
