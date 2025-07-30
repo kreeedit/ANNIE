@@ -22,9 +22,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import json
 from pathlib import Path
-import uuid  # For unique IDs
+import uuid # For unique IDs
 import itertools # For cycling through colors
-import re
 import traceback # For more detailed error printing
 import time
 
@@ -67,6 +66,7 @@ class TextAnnotator:
         self._entity_id_to_tree_iids = {}
         self._click_time = 0
         self._click_pos = (0, 0)
+        self._is_deleting = False
 
         # --- Sort Tracking ---
         self.entities_sort_column = None
@@ -207,13 +207,13 @@ class TextAnnotator:
             yscrollcommand=scrollbar_text_y.set,
             xscrollcommand=scrollbar_text_x.set,
             undo=True, state=tk.DISABLED,
+            insertbackground="black", insertwidth=2,
             borderwidth=1, relief="sunken",
         )
         self.text_area.pack(fill=tk.BOTH, expand=True)
         scrollbar_text_y.config(command=self.text_area.yview)
         scrollbar_text_x.config(command=self.text_area.xview)
 
-        self.text_area.bind("<Double-Button-1>", self._on_double_click)
         self.text_area.bind("<ButtonPress-1>", self._on_mouse_down)
         self.text_area.bind("<ButtonRelease-1>", self._on_highlight_release)
         self.text_area.bind("<Button-3>", self._on_text_right_click)
@@ -387,112 +387,6 @@ class TextAnnotator:
                 if tree == self.entities_tree: self.on_entity_select(None)
                 else: self.on_relation_select(None)
                 return "break"
-
-
-    def _on_double_click(self, event):
-        if not self.current_file_path or not self.entity_tags:
-            return "break"
-        original_state = self.text_area.cget('state')
-        needs_re_disable = False
-        if original_state == tk.DISABLED:
-            try:
-                self.text_area.config(state=tk.NORMAL)
-                needs_re_disable = True
-            except tk.TclError:
-                print("Warning: Could not enable text area state for double-click.")
-                return "break"
-        try:
-            click_index_str = self.text_area.index(f"@{event.x},{event.y}")
-            word_start_str = self.text_area.index(f"{click_index_str} wordstart")
-            word_end_str = self.text_area.index(f"{click_index_str} wordend")
-            if word_start_str == word_end_str:
-                # Click was not on a word or word boundaries are same
-                if needs_re_disable: self.text_area.config(state=tk.DISABLED) # Restore state
-                return "break"
-
-            if not self.allow_multilabel_overlap.get():
-                try:
-                    potential_start_l, potential_start_c = map(int, word_start_str.split('.'))
-                    potential_end_l, potential_end_c = map(int, word_end_str.split('.'))
-                except ValueError:
-                    print(f"Warning: Could not parse word boundaries: {word_start_str} / {word_end_str}")
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return "break"
-                entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
-                exact_span_already_exists = False
-                for entity in entities:
-                    start_l, start_c = entity.get('start_line'), entity.get('start_char')
-                    end_l, end_c = entity.get('end_line'), entity.get('end_char')
-                    if None not in [start_l, start_c, end_l, end_c]:
-                        if (potential_start_l == start_l and potential_start_c == start_c and
-                            potential_end_l == end_l and potential_end_c == end_c):
-                            # Check if it's the same tag too for this particular check
-                            if entity.get('tag') == self.selected_entity_tag.get():
-                                exact_span_already_exists = True
-                                break
-                if exact_span_already_exists:
-                    self.status_var.set("Word span already annotated with this tag. Enable multi-label to overlap or change tag.")
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return "break"
-
-                # Check if clicking *inside* any existing annotation (more general overlap)
-                try:
-                    click_line, click_char = map(int, click_index_str.split('.'))
-                    click_pos = (click_line, click_char)
-                    clicked_on_existing_text = False
-                    for entity in reversed(entities):
-                        start_l, start_c = entity.get('start_line'), entity.get('start_char')
-                        end_l, end_c = entity.get('end_line'), entity.get('end_char')
-                        if None not in [start_l, start_c, end_l, end_c]:
-                            span_start = (start_l, start_c)
-                            span_end = (end_l, end_c)
-                            if span_start <= click_pos < span_end:
-                                clicked_on_existing_text = True
-                                break
-                except ValueError:
-                    print(f"Warning: Could not parse click index: {click_index_str}")
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return "break"
-
-                if clicked_on_existing_text:
-                    # This check might be too restrictive if a user wants to annotate a word
-                    # that happens to be inside a larger, different annotation.
-                    # However, for double-click, it's often intended to select *that* annotation.
-                    # For multi-label, highlighting a sub-span is preferred.
-                    self.status_var.set("Clicked on existing annotation. Highlight to annotate sub-span or enable multi-label.")
-                    if needs_re_disable: self.text_area.config(state=tk.DISABLED)
-                    return "break"
-
-            # Ensure text area is normal for selection and annotation call
-            if self.text_area.cget('state') == tk.DISABLED:
-                self.text_area.config(state=tk.NORMAL)
-                needs_re_disable = True # Ensure it's marked if we just enabled it
-
-            self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-            self.text_area.tag_add(tk.SEL, word_start_str, word_end_str)
-            self.annotate_selection() # This will handle the actual annotation logic
-            try:
-                self.text_area.tag_remove("selection_highlight", "1.0", tk.END) # Clear selection after annotation attempt
-            except tk.TclError: pass # Ignore if no selection
-        except tk.TclError as e:
-            if "text doesn't contain" not in str(e).lower() and "bad text index" not in str(e).lower():
-                pass # Benign errors from clicking outside text content
-            else:
-                print(f"Warning: TclError during double-click: {e}")
-        except Exception as e:
-            print(f"Error during double-click processing: {e}")
-            traceback.print_exc()
-        finally:
-            if self.text_area.winfo_exists():
-                if needs_re_disable and self.text_area.cget('state') == tk.NORMAL: # only disable if we enabled it
-                    try: self.text_area.config(state=tk.DISABLED)
-                    except tk.TclError: print("Warning: Could not re-disable text area state after double-click.")
-                # If it started NORMAL but somehow became DISABLED (unlikely here, but good practice)
-                elif not needs_re_disable and self.text_area.cget('state') == tk.DISABLED and original_state == tk.NORMAL:
-                    try: self.text_area.config(state=tk.NORMAL)
-                    except tk.TclError: print("Warning: Could not restore text area to NORMAL state after double-click.")
-        return "break" # Prevent other bindings
-
 
     def _on_highlight_release(self, event):
         """
@@ -1236,86 +1130,88 @@ class TextAnnotator:
                 except tk.TclError: pass
 
     def remove_entity_annotation(self, event=None):
-        selected_tree_iids = self.entities_tree.selection()
-        if not selected_tree_iids:
-            messagebox.showinfo("Info", "Select one or more entities from the list to remove.", parent=self.root)
+        # If the function is already running, ignore this new call.
+        if self._is_deleting:
             return
 
-        if not self.current_file_path or self.current_file_path not in self.annotations:
-            messagebox.showerror("Error", "Cannot remove entity: No file/annotations.", parent=self.root)
-            return
+        self._is_deleting = True # Activate the lock
+        try:
+            # --- All of the original deletion logic is now inside this try block ---
+            selected_tree_iids = self.entities_tree.selection()
+            if not selected_tree_iids:
+                messagebox.showinfo("Info", "Select one or more entities from the list to remove.", parent=self.root)
+                return
 
-        entities_to_remove_data = []
-        entity_ids_to_remove = set()
-        entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
+            if not self.current_file_path or self.current_file_path not in self.annotations:
+                messagebox.showerror("Error", "Cannot remove entity: No file/annotations.", parent=self.root)
+                return
 
-        # This loop now uses the reliable Row ID to get data, bypassing the widget bug.
-        for tree_iid in selected_tree_iids:
-            if not self.entities_tree.exists(tree_iid): continue
+            entities_to_remove_data = []
+            entity_ids_to_remove = set()
+            entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
 
-            try:
-                parts = tree_iid.split('|')
-                if len(parts) < 5 or parts[0] != 'entity': continue
+            for tree_iid in selected_tree_iids:
+                if not self.entities_tree.exists(tree_iid): continue
+                try:
+                    parts = tree_iid.split('|')
+                    if len(parts) < 6 or parts[0] != 'entity': continue
 
-                entity_id = parts[1]
-                start_pos_str = parts[2]
-                end_pos_str = parts[3]
-                tag_from_tree = parts[4]
+                    entity_id, start_pos_str, end_pos_str, tag_from_tree = parts[1], parts[2], parts[3], parts[4]
 
-                # Find the exact entity dictionary instance using the parsed data
-                for entity_dict in entities_in_file:
-                    if (entity_dict.get('id') == entity_id and
-                        f"{entity_dict.get('start_line')}.{entity_dict.get('start_char')}" == start_pos_str and
-                        f"{entity_dict.get('end_line')}.{entity_dict.get('end_char')}" == end_pos_str and
-                        entity_dict.get('tag') == tag_from_tree):
-                        entities_to_remove_data.append(entity_dict)
-                        entity_ids_to_remove.add(entity_id)
-                        break
-            except Exception as e:
-                print(f"Warning: Could not parse tree item IID '{tree_iid}': {e}")
+                    for entity_dict in entities_in_file:
+                        if (entity_dict.get('id') == entity_id and
+                            f"{entity_dict.get('start_line')}.{entity_dict.get('start_char')}" == start_pos_str and
+                            f"{entity_dict.get('end_line')}.{entity_dict.get('end_char')}" == end_pos_str and
+                            entity_dict.get('tag') == tag_from_tree):
+                            entities_to_remove_data.append(entity_dict)
+                            entity_ids_to_remove.add(entity_id)
+                            break
+                except Exception as e:
+                    print(f"Warning: Could not parse tree item IID '{tree_iid}': {e}")
 
-        if not entities_to_remove_data:
-            messagebox.showerror("Error", "Could not retrieve data for selected entities.", parent=self.root)
-            return
+            if not entities_to_remove_data:
+                messagebox.showerror("Error", "Could not retrieve data for selected entities.", parent=self.root)
+                return
 
-        confirm = messagebox.askyesno("Confirm Removal",
-            f"Remove {len(entities_to_remove_data)} selected entity instance(s)?\n"
-            f"WARNING: If all instances of an entity ID are removed, associated relations will also be removed.", parent=self.root)
+            confirm = messagebox.askyesno("Confirm Removal",
+                f"Remove {len(entities_to_remove_data)} selected entity instance(s)?\n"
+                f"WARNING: If all instances of an entity ID are removed, associated relations will also be removed.", parent=self.root)
 
-        if not confirm: return
+            if not confirm: return
 
-        self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
+            self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
 
-        temp_entities_list = entities_in_file[:]
-        num_removed_from_list = 0
-        for entity_to_del in entities_to_remove_data:
-            try:
-                temp_entities_list.remove(entity_to_del)
-                num_removed_from_list += 1
-            except ValueError:
-                print(f"Warning: Entity to delete not found in list: {entity_to_del.get('id')}")
+            temp_entities_list = entities_in_file[:]
+            for entity_to_del in entities_to_remove_data:
+                try:
+                    temp_entities_list.remove(entity_to_del)
+                except ValueError:
+                    print(f"Warning: Entity to delete not found in list: {entity_to_del.get('id')}")
 
-        self.annotations[self.current_file_path]["entities"] = temp_entities_list
-        removed_entity_count = num_removed_from_list
-        relations = self.annotations[self.current_file_path].get("relations", [])
-        removed_relation_count = 0
+            self.annotations[self.current_file_path]["entities"] = temp_entities_list
+            removed_entity_count = len(entities_to_remove_data)
+            relations = self.annotations[self.current_file_path].get("relations", [])
+            removed_relation_count = 0
 
-        remaining_entity_ids_in_file = {e.get('id') for e in self.annotations[self.current_file_path]["entities"]}
-        ids_that_became_orphaned = entity_ids_to_remove - remaining_entity_ids_in_file
+            remaining_entity_ids_in_file = {e.get('id') for e in self.annotations[self.current_file_path]["entities"]}
+            ids_that_became_orphaned = entity_ids_to_remove - remaining_entity_ids_in_file
 
-        if relations and ids_that_became_orphaned:
-            relations_original_count = len(relations)
-            relations_remaining = [rel for rel in relations if
-                                   rel.get('head_id') not in ids_that_became_orphaned and
-                                   rel.get('tail_id') not in ids_that_became_orphaned]
-            removed_relation_count = relations_original_count - len(relations_remaining)
-            self.annotations[self.current_file_path]["relations"] = relations_remaining
+            if relations and ids_that_became_orphaned:
+                relations_original_count = len(relations)
+                relations_remaining = [rel for rel in relations if
+                                    rel.get('head_id') not in ids_that_became_orphaned and
+                                    rel.get('tail_id') not in ids_that_became_orphaned]
+                removed_relation_count = relations_original_count - len(relations_remaining)
+                self.annotations[self.current_file_path]["relations"] = relations_remaining
 
-        self.update_entities_list()
-        self.update_relations_list()
-        self.apply_annotations_to_text()
-        self.status_var.set(f"Removed {removed_entity_count} entity instances. {removed_relation_count} relations potentially removed.")
-        self._update_button_states()
+            self.update_entities_list()
+            self.update_relations_list()
+            self.apply_annotations_to_text()
+            self.status_var.set(f"Removed {removed_entity_count} entity instances. {removed_relation_count} relations potentially removed.")
+            self._update_button_states()
+
+        finally:
+            self._is_deleting = False
 
 
     def merge_selected_entities(self):
@@ -1324,62 +1220,55 @@ class TextAnnotator:
             messagebox.showinfo("Info", "Select 2+ entity instances to merge.", parent=self.root); return
         if not self.current_file_path or self.current_file_path not in self.annotations:
             messagebox.showerror("Error", "Cannot merge: No file/annotations.", parent=self.root); return
+
         selected_entities_data = []
         entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
-
-        # Store (id, start_pos_str, end_pos_str, tag) to uniquely identify tree rows' backing data
-        # as tree_row_iid is generated and might not directly map to a simple index
         processed_tree_row_keys = set()
 
         for tree_iid in selected_tree_iids:
             if not self.entities_tree.exists(tree_iid): continue
             try:
-                values = self.entities_tree.item(tree_iid, 'values')
-                if not values or len(values) < 5: continue # id, start, end, text, tag
-                entity_id, start_pos_str, end_pos_str, _, tag_from_tree = values[0], values[1], values[2], values[4]
+                parts = tree_iid.split('|')
+                if len(parts) < 6 or parts[0] != 'entity': continue
 
-                # Unique key for what this tree row represents in terms of data
-                # This helps avoid processing the same underlying data multiple times if the tree somehow had duplicates
-                # pointing to the exact same entity dict (which it shouldn't with current iid generation).
-                # More importantly, it helps fetch the correct dict from entities_in_file.
+                entity_id = parts[1]
+                start_pos_str = parts[2]
+                end_pos_str = parts[3]
+                tag_from_tree = parts[4]
+
                 tree_row_key = (entity_id, start_pos_str, end_pos_str, tag_from_tree)
                 if tree_row_key in processed_tree_row_keys: continue
 
+                # Find the backing dictionary for this specific instance
                 found_dict = None
                 for entity_dict in entities_in_file:
                     if (entity_dict.get('id') == entity_id and
                         f"{entity_dict.get('start_line')}.{entity_dict.get('start_char')}" == start_pos_str and
                         f"{entity_dict.get('end_line')}.{entity_dict.get('end_char')}" == end_pos_str and
-                        entity_dict.get('tag') == tag_from_tree): # Ensure we get the specific dict matching the tree row
-                        if all(k in entity_dict for k in ['id', 'start_line', 'start_char', 'end_line', 'end_char', 'text', 'tag']):
-                            found_dict = entity_dict
-                            break
+                        entity_dict.get('tag') == tag_from_tree):
+                        found_dict = entity_dict
+                        break
+
                 if found_dict:
                     selected_entities_data.append(found_dict)
                     processed_tree_row_keys.add(tree_row_key)
                 else:
-                    print(f"Warning: Could not find backing data for tree row: ID {entity_id}, Pos {start_pos_str}, Tag {tag_from_tree}")
+                    print(f"Warning: Could not find backing data for tree row: {tree_row_key}")
+            except Exception as e:
+                print(f"Warning: Error getting data for merge: {e}")
 
-            except Exception as e: print(f"Warning: Error getting data for merge: {e}")
-
-        if len(selected_entities_data) < 2: # Need at least two distinct entity dicts
+        if len(selected_entities_data) < 2:
             messagebox.showerror("Error", "Need at least two valid and distinct instances to merge.", parent=self.root); return
 
-        # Sort to pick a canonical entity consistently (e.g., first one by position)
         selected_entities_data.sort(key=lambda e: (e.get('start_line', 0), e.get('start_char', 0), e.get('id')))
         canonical_entity_dict = selected_entities_data[0]
-        canonical_id = canonical_entity_dict.get('id') # This will be the ID all others are changed to.
-
-        # IMPORTANT: The canonical entity also has a tag. Merging means all these instances now share an ID.
-        # The tags of the individual instances remain as they are in their dicts. We are merging the *conceptual entity ID*.
+        canonical_id = canonical_entity_dict.get('id')
         if not canonical_id: messagebox.showerror("Error", "Failed to get canonical ID.", parent=self.root); return
 
-        # Collect IDs of entities that will be changed TO the canonical_id
         ids_to_change_to_canonical = {e.get('id') for e in selected_entities_data if e.get('id') != canonical_id}
-        # Collect the actual dictionary objects whose 'id' field needs to be updated
         dicts_to_update_id_field = [e for e in selected_entities_data if e.get('id') != canonical_id]
 
-        if not dicts_to_update_id_field: # All selected instances already share the same ID
+        if not dicts_to_update_id_field:
             messagebox.showinfo("Info", "Selected instances already share the same ID.", parent=self.root); return
 
         confirm = messagebox.askyesno("Confirm Merge",
@@ -1389,16 +1278,14 @@ class TextAnnotator:
         if not confirm: self.status_var.set("Merge cancelled."); return
 
         modified_entity_instances = 0
-        # 1. Update Entity IDs directly in the `entities_in_file` list
         for entity_dict_instance in dicts_to_update_id_field:
-            # entity_dict_instance is a direct reference to a dict in entities_in_file
-            if entity_dict_instance['id'] != canonical_id : # Double check
+            if entity_dict_instance['id'] != canonical_id:
                 entity_dict_instance['id'] = canonical_id
-                modified_entity_instances +=1
+                modified_entity_instances += 1
 
         modified_relation_endpoints = 0
         relations = self.annotations[self.current_file_path].get("relations", [])
-        if relations and ids_to_change_to_canonical: # If there are old IDs that need remapping
+        if relations and ids_to_change_to_canonical:
             for i, rel in enumerate(relations):
                 rel_mod = False
                 if rel.get('head_id') in ids_to_change_to_canonical:
@@ -1410,7 +1297,7 @@ class TextAnnotator:
                 if rel_mod: modified_relation_endpoints += 1
 
         removed_duplicates = 0
-        if relations and modified_relation_endpoints > 0: # Only check if relations were possibly changed
+        if relations and modified_relation_endpoints > 0:
             unique_relations = []; seen_signatures = set()
             for rel in relations:
                 sig = (rel.get('head_id'), rel.get('tail_id'), rel.get('type'))
@@ -1423,23 +1310,18 @@ class TextAnnotator:
         self.update_entities_list(); self.update_relations_list(); self.apply_annotations_to_text()
         self.root.update_idletasks()
 
-        # Attempt to re-select all instances that now share the canonical_id
-        # These are the original selection plus those whose IDs were changed.
         tree_iids_to_reselect_after_merge = []
         try:
-            # Find all tree rows that now correspond to the canonical_id
-            # This includes the original canonical one and those that were changed
-            if canonical_id in self._entity_id_to_tree_iids: # _entity_id_to_tree_iids was updated by update_entities_list
-                 tree_iids_to_reselect_after_merge = self._entity_id_to_tree_iids[canonical_id]
-
+            if canonical_id in self._entity_id_to_tree_iids:
+                tree_iids_to_reselect_after_merge = self._entity_id_to_tree_iids[canonical_id]
             if tree_iids_to_reselect_after_merge:
                 valid_reselect = [tid for tid in tree_iids_to_reselect_after_merge if self.entities_tree.exists(tid)]
                 if valid_reselect:
                     self.entities_tree.selection_set(valid_reselect)
-                    if valid_reselect: # ensure not empty
+                    if valid_reselect:
                         self.entities_tree.focus(valid_reselect[0])
                         self.entities_tree.see(valid_reselect[0])
-                    self.on_entity_select(None) # Update internal selection state for relations
+                    self.on_entity_select(None)
                 else: self.selected_entity_ids_for_relation = []; self._update_button_states()
             else: self.selected_entity_ids_for_relation = []; self._update_button_states()
         except Exception as e:
@@ -2073,9 +1955,13 @@ class TextAnnotator:
             if item_type_name == "Entity Tags" and index < 10:
                 hotkey_num = (index + 1) % 10
                 display_text = f"{hotkey_num}: {item}"
-                listbox.insert(tk.END, display_text)
+
+            listbox.insert(tk.END, display_text) #
+
             if item_type_name == "Entity Tags":
-                try: listbox.itemconfig(tk.END, {'bg': self.get_color_for_tag(item)})
+                try:
+                    # Use index instead of tk.END for accuracy
+                    listbox.itemconfig(index, {'bg': self.get_color_for_tag(item)})
                 except tk.TclError: pass
         listbox.pack(fill=tk.BOTH, expand=True); scrollbar.config(command=listbox.yview)
         controls_frame = tk.Frame(window); controls_frame.pack(fill=tk.X, padx=10, pady=5)
