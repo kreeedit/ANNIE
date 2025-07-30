@@ -282,6 +282,7 @@ class TextAnnotator:
         self.entities_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.entities_tree.bind("<<TreeviewSelect>>", self.on_entity_select)
         self.entities_tree.bind("<Key>", lambda event: self._treeview_key_navigate(self.entities_tree, event))
+        self.entities_tree.bind("<Delete>", self.remove_entity_annotation)
         scrollbar_entities_y.config(command=self.entities_tree.yview)
 
         relations_list_frame = tk.LabelFrame(list_panel, text="Relations", padx=5, pady=5)
@@ -305,6 +306,7 @@ class TextAnnotator:
         self.relations_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.relations_tree.bind("<<TreeviewSelect>>", self.on_relation_select)
         self.relations_tree.bind("<Key>", lambda event: self._treeview_key_navigate(self.relations_tree, event))
+        self.relations_tree.bind("<Delete>", self.remove_relation_annotation)
         scrollbar_relations_y.config(command=self.relations_tree.yview)
 
 
@@ -470,7 +472,7 @@ class TextAnnotator:
             self.text_area.tag_add(tk.SEL, word_start_str, word_end_str)
             self.annotate_selection() # This will handle the actual annotation logic
             try:
-                self.text_area.tag_remove(tk.SEL, "1.0", tk.END) # Clear selection after annotation attempt
+                self.text_area.tag_remove("selection_highlight", "1.0", tk.END) # Clear selection after annotation attempt
             except tk.TclError: pass # Ignore if no selection
         except tk.TclError as e:
             if "text doesn't contain" not in str(e).lower() and "bad text index" not in str(e).lower():
@@ -1233,36 +1235,44 @@ class TextAnnotator:
                 try: self.text_area.config(state=tk.DISABLED)
                 except tk.TclError: pass
 
-    def remove_entity_annotation(self):
+    def remove_entity_annotation(self, event=None):
         selected_tree_iids = self.entities_tree.selection()
         if not selected_tree_iids:
             messagebox.showinfo("Info", "Select one or more entities from the list to remove.", parent=self.root)
             return
+
         if not self.current_file_path or self.current_file_path not in self.annotations:
             messagebox.showerror("Error", "Cannot remove entity: No file/annotations.", parent=self.root)
             return
+
         entities_to_remove_data = []
         entity_ids_to_remove = set()
         entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
+
+        # This loop now uses the reliable Row ID to get data, bypassing the widget bug.
         for tree_iid in selected_tree_iids:
             if not self.entities_tree.exists(tree_iid): continue
-            try:
-                values = self.entities_tree.item(tree_iid, 'values')
-                # Values: (entity_id, start_pos_str, end_pos_str, disp_text, tag)
-                if not values or len(values) < 5: continue
-                entity_id, start_pos_str, end_pos_str, _, tag_from_tree = values[0], values[1], values[2], values[4]
 
-                # Find the exact entity dictionary instance
+            try:
+                parts = tree_iid.split('|')
+                if len(parts) < 5 or parts[0] != 'entity': continue
+
+                entity_id = parts[1]
+                start_pos_str = parts[2]
+                end_pos_str = parts[3]
+                tag_from_tree = parts[4]
+
+                # Find the exact entity dictionary instance using the parsed data
                 for entity_dict in entities_in_file:
                     if (entity_dict.get('id') == entity_id and
                         f"{entity_dict.get('start_line')}.{entity_dict.get('start_char')}" == start_pos_str and
                         f"{entity_dict.get('end_line')}.{entity_dict.get('end_char')}" == end_pos_str and
-                        entity_dict.get('tag') == tag_from_tree): # Match tag as well for precision
+                        entity_dict.get('tag') == tag_from_tree):
                         entities_to_remove_data.append(entity_dict)
-                        entity_ids_to_remove.add(entity_id) # This ID might be associated with other instances
+                        entity_ids_to_remove.add(entity_id)
                         break
             except Exception as e:
-                print(f"Warning: Error getting data for selected tree item {tree_iid}: {e}")
+                print(f"Warning: Could not parse tree item IID '{tree_iid}': {e}")
 
         if not entities_to_remove_data:
             messagebox.showerror("Error", "Could not retrieve data for selected entities.", parent=self.root)
@@ -1270,41 +1280,34 @@ class TextAnnotator:
 
         confirm = messagebox.askyesno("Confirm Removal",
             f"Remove {len(entities_to_remove_data)} selected entity instance(s)?\n"
-            f"(These specific instances will be removed. Other instances of the same conceptual entity ID might remain if not selected.)\n"
             f"WARNING: If all instances of an entity ID are removed, associated relations will also be removed.", parent=self.root)
+
         if not confirm: return
 
-        # Remove the specific entity instances from the list
-        # This needs to be done carefully to avoid modifying the list while iterating
-        # or issues if multiple tree rows point to the same dict (though current tree iid generation should prevent that)
+        self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
 
-        temp_entities_list = entities_in_file[:] # Work on a copy for removal
+        temp_entities_list = entities_in_file[:]
         num_removed_from_list = 0
         for entity_to_del in entities_to_remove_data:
             try:
-                temp_entities_list.remove(entity_to_del) # remove first occurrence of this specific dict
-                num_removed_from_list +=1
+                temp_entities_list.remove(entity_to_del)
+                num_removed_from_list += 1
             except ValueError:
-                print(f"Warning: Entity to delete not found in list (already removed or mismatch): {entity_to_del.get('id')}")
+                print(f"Warning: Entity to delete not found in list: {entity_to_del.get('id')}")
 
         self.annotations[self.current_file_path]["entities"] = temp_entities_list
         removed_entity_count = num_removed_from_list
-
         relations = self.annotations[self.current_file_path].get("relations", [])
         removed_relation_count = 0
 
-        # Check which unique entity IDs are *still present* after removal of specific instances
         remaining_entity_ids_in_file = {e.get('id') for e in self.annotations[self.current_file_path]["entities"]}
-
-        # Relations should be removed if their head_id or tail_id is one of the
-        # `entity_ids_to_remove` AND that ID no longer exists in `remaining_entity_ids_in_file`.
         ids_that_became_orphaned = entity_ids_to_remove - remaining_entity_ids_in_file
 
         if relations and ids_that_became_orphaned:
             relations_original_count = len(relations)
             relations_remaining = [rel for rel in relations if
-                                 rel.get('head_id') not in ids_that_became_orphaned and
-                                 rel.get('tail_id') not in ids_that_became_orphaned]
+                                   rel.get('head_id') not in ids_that_became_orphaned and
+                                   rel.get('tail_id') not in ids_that_became_orphaned]
             removed_relation_count = relations_original_count - len(relations_remaining)
             self.annotations[self.current_file_path]["relations"] = relations_remaining
 
@@ -1640,7 +1643,7 @@ class TextAnnotator:
 
                 # Generate a unique iid for this specific annotation instance in the tree
                 # Include tag in iid to differentiate if same span has multiple tags (different annotations)
-                tree_row_iid = f"entity_{entity_id}_{start_pos_str}_{tag}_{ann_index}"
+                tree_row_iid = f"entity|{entity_id}|{start_pos_str}|{end_pos_str}|{tag}|{ann_index}"
 
                 values_tuple = (entity_id, start_pos_str, end_pos_str, disp_text, tag)
 
@@ -1694,7 +1697,8 @@ class TextAnnotator:
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL) # Must be normal to add tags
         try:
-            self.text_area.tag_remove(tk.SEL, "1.0", tk.END) # Clear previous tk.SEL highlight
+            # This line is now corrected to remove the custom highlight
+            self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
 
             first_entity_pos_to_see = None
 
@@ -1792,7 +1796,7 @@ class TextAnnotator:
             self.status_var.set("Relation Head/Tail flipped.")
 
 
-    def remove_relation_annotation(self):
+    def remove_relation_annotation(self, event=None):
         selected_iids = self.relations_tree.selection()
         if len(selected_iids) != 1: return
         relation_id_to_remove = selected_iids[0]
