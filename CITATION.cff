@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Kovács"
+    given-names: "Tamás"
+    orcid: "https://orcid.org/0000-0002-3913-2946"
+title: "ANNIE: Annotation Interface for Named-entity & Information Extraction"
+version: 0.75
+doi: 10.5281/zenodo.15805548
+date-released: 2025-07-04
+url: "https://github.com/kreeedit/ANNIE"
