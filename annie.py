@@ -16,6 +16,8 @@ Adds optional multi-label annotation, allowing multiple and/or overlapping annot
 """
 
 import os
+import re
+import shutil # For high-level file operations, copying
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import json
@@ -136,6 +138,7 @@ class TextAnnotator:
 
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open Directory", command=self.load_directory)
+        file_menu.add_command(label="Add File(s) to Session...", command=self.add_files_to_session)
         file_menu.add_separator()
         file_menu.add_command(label="Load Session...", command=self.load_session)
         file_menu.add_command(label="Save Session", command=self.save_session)
@@ -714,6 +717,68 @@ class TextAnnotator:
                 self.status_var.set(f"No .txt files found in '{os.path.basename(directory)}'")
                 self.files_listbox.delete(0, tk.END)
             self._update_button_states()
+
+    def add_files_to_session(self):
+        """Allows adding new text files to the current session."""
+        if not self.files_list:
+            messagebox.showwarning("No Session Active", "Please open a directory or load a session first.", parent=self.root)
+            return
+
+        source_paths = filedialog.askopenfilenames(
+            title="Select Text File(s) to Add",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if not source_paths:
+            self.status_var.set("Add files cancelled.")
+            return
+
+        # Determine the session's working directory from the first file
+        destination_dir = os.path.dirname(self.files_list[0])
+        current_basenames = {os.path.basename(p) for p in self.files_list}
+        added_count = 0
+
+        for source_path in source_paths:
+            basename = os.path.basename(source_path)
+            dest_path = os.path.join(destination_dir, basename)
+
+            # Check for conflicts
+            if basename in current_basenames:
+                messagebox.showwarning("File Exists", f"A file named '{basename}' is already in this session. Skipping.", parent=self.root)
+                continue
+
+            # Copy the file to the session directory if it's not already there
+            if os.path.abspath(source_path) != os.path.abspath(dest_path):
+                try:
+                    shutil.copy2(source_path, dest_path)
+                except Exception as e:
+                    messagebox.showerror("Copy Error", f"Could not copy file '{basename}' to session directory.\n\nError: {e}", parent=self.root)
+                    continue
+
+            # Add the new file (using its destination path) to the session
+            self.files_list.append(dest_path)
+            self.files_listbox.insert(tk.END, basename)
+            current_basenames.add(basename)
+            added_count += 1
+
+        if added_count > 0:
+            # Sort the master list and refresh the UI listbox
+            current_selection_path = self.current_file_path
+            self.files_list.sort(key=lambda p: os.path.basename(p).lower())
+
+            self.files_listbox.delete(0, tk.END)
+            for path in self.files_list:
+                self.files_listbox.insert(tk.END, os.path.basename(path))
+
+            # Re-select the previously active file
+            if current_selection_path in self.files_list:
+                new_index = self.files_list.index(current_selection_path)
+                self.files_listbox.selection_set(new_index)
+                self.files_listbox.see(new_index)
+                self.files_listbox.activate(new_index)
+
+            self._update_button_states()
+            self.status_var.set(f"Successfully added {added_count} file(s) to the session.")
 
 
     def load_file(self, index):
