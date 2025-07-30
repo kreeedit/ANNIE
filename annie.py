@@ -207,7 +207,7 @@ class TextAnnotator:
             yscrollcommand=scrollbar_text_y.set,
             xscrollcommand=scrollbar_text_x.set,
             undo=True, state=tk.DISABLED,
-            borderwidth=1, relief="sunken"
+            borderwidth=1, relief="sunken",
         )
         self.text_area.pack(fill=tk.BOTH, expand=True)
         scrollbar_text_y.config(command=self.text_area.yview)
@@ -584,6 +584,9 @@ class TextAnnotator:
         if not confirm:
             self.status_var.set("Removal cancelled.")
             return
+
+        self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
+
         del entities_list[entity_index_to_remove]
         id_still_exists = any(e.get('id') == entity_id_being_removed for e in entities_list)
         removed_relation_count = 0
@@ -628,6 +631,9 @@ class TextAnnotator:
                  self.text_area.tag_configure("propagated_entity", underline=True)
         except tk.TclError as e:
             print(f"Warning: Could not configure text tag 'propagated_entity': {e}")
+
+        # Configure a tag for a prominent selection border
+        self.text_area.tag_configure("selection_highlight", borderwidth=1, relief=tk.SOLID)
 
 
     def _configure_treeview_tags(self):
@@ -1750,6 +1756,7 @@ class TextAnnotator:
         self.text_area.config(state=tk.NORMAL) # Must be normal to add tags
         try:
             self.text_area.tag_remove(tk.SEL, "1.0", tk.END) # Clear previous tk.SEL highlight
+
             first_entity_pos_to_see = None
 
             # Highlight all selected spans in the text_area
@@ -1762,7 +1769,7 @@ class TextAnnotator:
                         start_pos_str, end_pos_str = values[1], values[2]
                         try:
                             # This adds to the text widget's own selection highlight
-                            self.text_area.tag_add(tk.SEL, start_pos_str, end_pos_str)
+                            self.text_area.tag_add("selection_highlight", start_pos_str, end_pos_str)
                             if first_entity_pos_to_see is None: first_entity_pos_to_see = start_pos_str
                         except tk.TclError as te: print(f"Warning: Error highlighting entity span from list: {te}")
                 except Exception as e: print(f"Warning: Error processing entity selection for text highlight: {e}")
