@@ -33,7 +33,9 @@ try:
     from transformers import pipeline
     import torch
     TRANSFORMERS_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    print(f"--> IMPORT ERROR: Failed to import AI libraries. Please check your installation.")
+    print(f"--> Error details: {e}")
     TRANSFORMERS_AVAILABLE = False
 
 
