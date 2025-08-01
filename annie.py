@@ -193,6 +193,9 @@ class TextAnnotator:
         self.settings_menu.add_command(label="Manage Entity Tags...", command=self.manage_entity_tags)
         self.settings_menu.add_command(label="Manage Relation Types...", command=self.manage_relation_types)
         self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Load Tag/Relation Schema...", command=self.load_schema)
+        self.settings_menu.add_command(label="Save Tag/Relation Schema...", command=self.save_schema)
+        self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
         self.settings_menu.add_command(label="Pre-annotate with AI...", command=self.pre_annotate_with_ai)
         self.settings_menu.add_separator()
@@ -735,6 +738,70 @@ class TextAnnotator:
         finally:
             self.text_area.config(state=tk.DISABLED)
             self._update_button_states()
+
+    def save_schema(self):
+        """Saves the current entity tags and relation types to a JSON file."""
+        save_path = filedialog.asksaveasfilename(
+            title="Save Tag/Relation Schema",
+            defaultextension=".json",
+            filetypes=[("ANNIE Schema Files", "*.json"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if not save_path:
+            return
+
+        schema_data = {
+            "entity_tags": self.entity_tags,
+            "relation_types": self.relation_types
+        }
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(schema_data, f, indent=2)
+            self.status_var.set(f"Schema saved to {os.path.basename(save_path)}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save schema file:\n{e}", parent=self.root)
+
+    def load_schema(self):
+        """Loads entity tags and relation types from a JSON file, replacing the current ones."""
+        if self.annotations and not messagebox.askyesno("Confirm Load",
+            "Loading a new schema will replace your current tags. This may affect existing annotations if the tags don't match.\n\nContinue?"):
+            return
+
+        load_path = filedialog.askopenfilename(
+            title="Load Tag/Relation Schema",
+            filetypes=[("ANNIE Schema Files", "*.json"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if not load_path:
+            return
+
+        try:
+            with open(load_path, 'r', encoding='utf-8') as f:
+                schema_data = json.load(f)
+
+            if "entity_tags" not in schema_data or "relation_types" not in schema_data:
+                raise ValueError("File is not a valid schema file.")
+
+            self.entity_tags = schema_data["entity_tags"]
+            self.relation_types = schema_data["relation_types"]
+
+            # Refresh the entire UI to reflect the new schema
+            self._update_entity_tag_combobox()
+            self._update_relation_type_combobox()
+            self._ensure_default_colors() # Assign colors to any new tags
+            self._configure_text_tags()
+
+            # If a file is open, refresh its views
+            if self.current_file_path:
+                self.apply_annotations_to_text()
+                self.update_entities_list()
+                self.update_relations_list()
+
+            self.status_var.set(f"Successfully loaded schema from {os.path.basename(load_path)}")
+
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Could not load schema file:\n{e}", parent=self.root)
+
 
     def clear_views(self):
         original_state = self.text_area.cget('state')
