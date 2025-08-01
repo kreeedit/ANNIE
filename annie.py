@@ -180,6 +180,9 @@ class TextAnnotator:
         file_menu.add_command(label="Save Session", command=self.save_session)
         file_menu.add_command(label="Save Session As...", command=lambda: self.save_session(force_ask=True))
         file_menu.add_separator()
+        file_menu.add_command(label="Import Annotations...", command=self.import_annotations)
+        file_menu.add_command(label="Export for Training...", command=self.export_annotations)
+        file_menu.add_separator()
         file_menu.add_command(label="Save Annotations Only...", command=self.save_annotations)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_closing)
@@ -885,6 +888,353 @@ class TextAnnotator:
                 self.root.quit()
         else:
             self.root.quit()
+
+    def _tkinter_index_to_char_offset(self, text, line, char):
+        """Converts a Tkinter 'line.char' index to an absolute character offset."""
+        lines = text.split('\n')
+        # Sum the length of all preceding lines plus 1 for each newline character
+        offset = sum(len(l) + 1 for l in lines[:line - 1])
+        offset += char
+        return offset
+
+    # Import/Export Methods
+    def export_annotations(self):
+        """Exports annotations for the entire session in a standard ML training format."""
+        if not self.annotations or all(not data.get('entities') for data in self.annotations.values()):
+            messagebox.showinfo("Info", "There are no annotations to export.", parent=self.root)
+            return
+
+        # Simple dialog to choose format
+        import tkinter.simpledialog
+        format_choice = tkinter.simpledialog.askstring("Export Format", "Enter format (conll or spacy):", parent=self.root)
+
+        if not format_choice or format_choice.lower() not in ["conll", "spacy"]:
+            self.status_var.set("Export cancelled.")
+            return
+
+        format_choice = format_choice.lower()
+        file_types = [("CoNLL Files", "*.conll")] if format_choice == "conll" else [("JSONL Files", "*.jsonl")]
+        extension = ".conll" if format_choice == "conll" else ".jsonl"
+
+        save_path = filedialog.asksaveasfilename(
+            title=f"Export Annotations as {format_choice.upper()}",
+            defaultextension=extension,
+            filetypes=file_types,
+            parent=self.root
+        )
+
+        if not save_path:
+            self.status_var.set("Export cancelled.")
+            return
+
+        try:
+            if format_choice == "conll":
+                self._export_as_conll(save_path)
+            elif format_choice == "spacy":
+                self._export_as_spacy_jsonl(save_path)
+            messagebox.showinfo("Success", f"Annotations successfully exported to:\n{os.path.basename(save_path)}", parent=self.root)
+            self.status_var.set(f"Exported annotations to {os.path.basename(save_path)}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"An error occurred during export:\n{e}", parent=self.root)
+            traceback.print_exc()
+
+    def _export_as_spacy_jsonl(self, save_path):
+        """Exports all documents to a single spaCy v3 JSONL file."""
+        with open(save_path, 'w', encoding='utf-8') as f:
+            for file_path, data in self.annotations.items():
+                if not data.get("entities"): continue
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as text_file:
+                        content = text_file.read()
+                except Exception:
+                    print(f"Warning: Could not read file {file_path} for export. Skipping.")
+                    continue
+
+                entities = []
+                for ann in data['entities']:
+                    # Use the new helper to get absolute character positions from the actual file content
+                    start_char = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
+                    end_char = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
+                    entities.append([start_char, end_char, ann['tag']])
+
+                spacy_doc = {"text": content, "entities": entities}
+                f.write(json.dumps(spacy_doc, ensure_ascii=False) + '\n')
+
+    def _export_as_conll(self, save_path):
+        """Exports all documents to a single CoNLL-2003 formatted file."""
+        with open(save_path, 'w', encoding='utf-8') as f:
+            for file_path, data in self.annotations.items():
+                if not data.get("entities"): continue
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as text_file:
+                        content = text_file.read()
+                except Exception:
+                    print(f"Warning: Could not read file {file_path} for export. Skipping.")
+                    continue
+
+                # Simple regex tokenizer: finds sequences of word characters or single non-word/non-space characters
+                tokens = [(m.group(0), m.start()) for m in re.finditer(r'\w+|[^\w\s]', content)]
+                tags = ["O"] * len(tokens)
+
+                sorted_entities = sorted(data['entities'], key=lambda x: (x['start_line'], x['start_char']))
+
+                for entity in sorted_entities:
+                    # Use the new helper to get absolute character positions from the actual file content
+                    start_char_abs = self._tkinter_index_to_char_offset(content, entity['start_line'], entity['start_char'])
+                    end_char_abs = self._tkinter_index_to_char_offset(content, entity['end_line'], entity['end_char'])
+
+                    is_first_token = True
+                    for i, (token_text, token_start) in enumerate(tokens):
+                        token_end = token_start + len(token_text)
+                        # Check if the token is within the entity span
+                        if token_start >= start_char_abs and token_end <= end_char_abs:
+                            if is_first_token:
+                                tags[i] = f"B-{entity['tag']}"
+                                is_first_token = False
+                            else:
+                                tags[i] = f"I-{entity['tag']}"
+
+                # Write tokens and tags to file
+                for i, (token_text, _) in enumerate(tokens):
+                    f.write(f"{token_text} {tags[i]}\n")
+
+                # Add a blank line to separate documents
+                f.write("\n")
+
+    def _ask_for_save_directory(self, initial_dir):
+        """Creates a custom dialog to select or create a directory."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Save Directory")
+        dialog.geometry("500x150")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        result = {"path": ""}
+
+        tk.Label(dialog, text="Choose a directory to save the imported files into.\nYou can browse for one or type a path to a new folder.").pack(pady=10)
+
+        entry_frame = tk.Frame(dialog)
+        entry_frame.pack(fill=tk.X, padx=10)
+
+        path_var = tk.StringVar(value=initial_dir)
+        entry = tk.Entry(entry_frame, textvariable=path_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse():
+            dir_path = filedialog.askdirectory(initialdir=path_var.get(), parent=dialog)
+            if dir_path:
+                path_var.set(dir_path)
+
+        browse_btn = tk.Button(entry_frame, text="Browse...", command=browse)
+        browse_btn.pack(side=tk.LEFT, padx=(5,0))
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=10)
+
+        def on_ok():
+            result["path"] = path_var.get()
+            dialog.destroy()
+
+        def on_cancel():
+            result["path"] = ""
+            dialog.destroy()
+
+        ok_btn = tk.Button(btn_frame, text="OK", width=10, command=on_ok)
+        ok_btn.pack(side=tk.LEFT, padx=5)
+        cancel_btn = tk.Button(btn_frame, text="Cancel", width=10, command=on_cancel)
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+
+        self.root.wait_window(dialog)
+        return result["path"]
+
+    def import_annotations(self):
+        """Imports annotations from CoNLL or spaCy JSONL files, creating new documents."""
+        from tkinter import simpledialog
+
+        import_path = filedialog.askopenfilename(
+            title="Select Annotation File to Import",
+            filetypes=[("All Supported Formats", "*.conll *.jsonl"), ("CoNLL Files", "*.conll"), ("JSONL Files", "*.jsonl")],
+            parent=self.root
+        )
+        if not import_path: return
+
+        try:
+            # --- Step 1: Parse the file based on its type ---
+            parsed_docs, found_tags = [], set()
+            if import_path.lower().endswith(".conll"):
+                parsed_docs, found_tags = self._parse_conll_into_documents(import_path)
+            elif import_path.lower().endswith(".jsonl"):
+                parsed_docs, found_tags = self._parse_jsonl_into_documents(import_path)
+            else:
+                messagebox.showwarning("Unsupported Format", "Please select a .conll or .jsonl file.")
+                return
+
+            if not parsed_docs:
+                messagebox.showinfo("Info", "No valid documents found in the import file.", parent=self.root)
+                return
+
+            # --- Step 2: Handle new tags ---
+            new_tags = found_tags - set(self.entity_tags)
+            if new_tags:
+                if messagebox.askyesno("New Tags Found", f"Found new tags: {', '.join(new_tags)}.\n\nAdd them to the session?"):
+                    self.entity_tags.extend(list(new_tags))
+                    self._update_entity_tag_combobox()
+                    self._configure_text_tags()
+                else:
+                    approved_tags = set(self.entity_tags)
+                    for doc in parsed_docs:
+                        doc['annotations'] = [ann for ann in doc['annotations'] if ann['tag'] in approved_tags]
+
+            # --- Step 3: Get save location ---
+            save_dir = self._ask_for_save_directory(os.path.dirname(import_path))
+            if not save_dir:
+                self.status_var.set("Import cancelled.")
+                return
+            os.makedirs(save_dir, exist_ok=True)
+
+            # --- Step 4: Save files and update UI ---
+            if not self.files_list and parsed_docs: self._reset_state()
+
+            base_name_for_docs = os.path.basename(os.path.splitext(import_path)[0])
+            new_file_paths = []
+            for i, doc in enumerate(parsed_docs):
+                save_path = os.path.join(save_dir, f"{base_name_for_docs}_{i+1}.txt")
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    f.write(doc['text'])
+
+                self.files_list.append(save_path)
+                new_file_paths.append(save_path)
+
+                final_annotations = []
+                for ann in doc['annotations']:
+                    start_pos = self._char_offset_to_tkinter_index(doc['text'], ann['start'])
+                    end_pos = self._char_offset_to_tkinter_index(doc['text'], ann['end'])
+                    start_line, start_char = map(int, start_pos.split('.'))
+                    end_line, end_char = map(int, end_pos.split('.'))
+                    text = doc['text'][ann['start']:ann['end']]
+
+                    final_annotations.append({'id': uuid.uuid4().hex, 'start_line': start_line, 'start_char': start_char,
+                                                'end_line': end_line, 'end_char': end_char, 'text': text, 'tag': ann['tag']})
+                self.annotations[save_path] = {"entities": final_annotations, "relations": []}
+
+            self.files_listbox.delete(0, tk.END)
+            for path in self.files_list:
+                self.files_listbox.insert(tk.END, os.path.basename(path))
+
+            self.load_file(len(self.files_list) - len(new_file_paths))
+            self.status_var.set(f"Successfully imported {len(parsed_docs)} documents.")
+
+        except Exception as e:
+            messagebox.showerror("Import Error", f"An error occurred during import:\n{e}", parent=self.root)
+            traceback.print_exc()
+
+    def _parse_conll_into_documents(self, file_path):
+        # This method remains the same as the last version you have
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        doc_chunks = re.split(r'\n\s*\n|-DOCSTART-.*\n', content)
+        documents = []
+        all_tags = set()
+
+        for chunk in doc_chunks:
+            if not chunk.strip(): continue
+
+            doc_lines = chunk.strip().splitlines()
+            text, annotations, tags = self._process_conll_chunk(doc_lines)
+            if text.strip():
+                documents.append({'text': text, 'annotations': annotations})
+                all_tags.update(tags)
+
+        return documents, all_tags
+
+    def _parse_jsonl_into_documents(self, file_path):
+        """
+        Parses a JSONL file (from Prodigy or spaCy) into a list of document objects.
+        """
+        documents = []
+        all_tags = set()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # The file can have multiple JSON objects on one line, so we need to handle that
+            content = f.read().strip()
+            # Split by '}{' to handle concatenated JSON and re-add the braces
+            json_objects_str = content.replace('}{', '}\n{').splitlines()
+
+            for line in json_objects_str:
+                if not line.strip(): continue
+
+                data = json.loads(line)
+                text = data.get("text")
+
+                # Look for "spans" instead of "entities" ---
+                spans = data.get("spans", [])
+
+                if text:
+                    annotations = []
+                    for span in spans:
+                        # Use the correct keys from the span dictionary: "start", "end", "label"
+                        start = span.get("start")
+                        end = span.get("end")
+                        tag = span.get("label")
+
+                        if start is not None and end is not None and tag is not None:
+                            annotations.append({'start': start, 'end': end, 'tag': tag})
+                            all_tags.add(tag)
+
+                    documents.append({'text': text, 'annotations': annotations})
+
+        return documents, all_tags
+
+
+    def _process_conll_chunk(self, lines):
+        """Helper to process a list of CoNLL lines into text and annotations."""
+        reconstructed_text = ""
+        annotations = []
+        found_tags = set()
+        current_char = 0
+        current_entity = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if reconstructed_text and not reconstructed_text.endswith(('\n', ' ')):
+                    reconstructed_text += "\n" # Treat blank lines within a doc as sentence breaks
+                    current_char += 1
+                if current_entity:
+                    annotations.append(current_entity)
+                    current_entity = None
+                continue
+
+            parts = line.split()
+            if len(parts) < 2: continue
+            token, tag = parts[0], parts[-1]
+
+            # Smartly add space before the next token, but not after a newline
+            if reconstructed_text and not reconstructed_text.endswith('\n'):
+                reconstructed_text += " "
+                current_char += 1
+
+            start_char = current_char
+            reconstructed_text += token
+            current_char += len(token)
+            end_char = current_char
+
+            if tag.startswith("B-"):
+                if current_entity: annotations.append(current_entity)
+                tag_name = tag[2:]
+                found_tags.add(tag_name)
+                current_entity = {'tag': tag_name, 'start': start_char, 'end': end_char}
+            elif tag.startswith("I-") and current_entity and tag[2:] == current_entity['tag']:
+                current_entity['end'] = end_char
+            else: # O tag
+                if current_entity: annotations.append(current_entity)
+                current_entity = None
+
+        if current_entity: annotations.append(current_entity)
+
+        return reconstructed_text, annotations, found_tags
 
     def _spans_overlap_numeric(self, start1_l, start1_c, end1_l, end1_c, start2_l, start2_c, end2_l, end2_c):
         span1_start, span1_end = (start1_l, start1_c), (end1_l, end1_c)
