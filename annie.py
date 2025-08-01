@@ -829,7 +829,9 @@ class TextAnnotator:
                 initialdir=initial_dir, initialfile=f"{dir_name}_session.json", defaultextension=".json",
                 filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root
             )
-        if not save_path: return
+        if not save_path:
+            self.status_var.set("Save session cancelled.")
+            return
 
         session_data = {
             "version": SESSION_FILE_VERSION,
@@ -845,12 +847,16 @@ class TextAnnotator:
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False)
+
             self.session_save_path = save_path
             self.status_var.set(f"Session saved to '{os.path.basename(save_path)}'")
-            self.root.title(f"ANNIE - {os.path.basename(initial_dir)} [{os.path.basename(save_path)}]")
+
+            # Get the base directory name reliably from the file list
+            base_dir_name = os.path.basename(os.path.dirname(self.files_list[0]))
+            self.root.title(f"ANNIE - {base_dir_name} [{os.path.basename(save_path)}]")
+
         except Exception as e:
             messagebox.showerror("Save Session Error", f"Could not write session file:\n{e}", parent=self.root)
-
     def load_session(self):
         if self._has_unsaved_changes():
             if not messagebox.askyesno("Unsaved Changes", "You have unsaved changes.\nDiscard and load session?", parent=self.root):
@@ -1298,16 +1304,28 @@ class TextAnnotator:
             end_pos = self.text_area.index(tk.SEL_LAST)
             if start_pos == end_pos: return
 
-            adj_start_pos = self.text_area.index(f"{start_pos} wordstart")
-            adj_end_pos = self.text_area.index(f"{self.text_area.index(f'{end_pos}-1c')} wordend")
+            #  first, then trim.
+            # Snap the initial user selection to the nearest word boundaries.
+            snapped_start_pos = self.text_area.index(f"{start_pos} wordstart")
+            snapped_end_pos = self.text_area.index(f"{self.text_area.index(f'{end_pos}-1c')} wordend")
 
-            if self.text_area.compare(adj_start_pos, ">=", adj_end_pos): return
+            if self.text_area.compare(snapped_start_pos, ">=", snapped_end_pos): return
 
-            final_text = self.text_area.get(adj_start_pos, adj_end_pos)
-            if not final_text.strip(): return
+            # Get the text from this snapped selection.
+            snapped_text = self.text_area.get(snapped_start_pos, snapped_end_pos)
 
-            start_line, start_char = map(int, adj_start_pos.split('.'))
-            end_line, end_char = map(int, adj_end_pos.split('.'))
+            # Trim any leading/trailing whitespace from the text and adjust positions.
+            leading_spaces = len(snapped_text) - len(snapped_text.lstrip())
+            trailing_spaces = len(snapped_text) - len(snapped_text.rstrip())
+
+            final_text = snapped_text.strip()
+            if not final_text: return # Selection was only whitespace
+
+            final_start_pos = self.text_area.index(f"{snapped_start_pos}+{leading_spaces}c")
+            final_end_pos = self.text_area.index(f"{snapped_end_pos}-{trailing_spaces}c")
+
+            start_line, start_char = map(int, final_start_pos.split('.'))
+            end_line, end_char = map(int, final_end_pos.split('.'))
             tag = self.selected_entity_tag.get()
             if not tag: return
 
@@ -1317,11 +1335,11 @@ class TextAnnotator:
                 if self._is_overlapping_in_list(start_line, start_char, end_line, end_char, entities_in_file):
                     messagebox.showwarning("Overlap Detected", "Annotation overlaps with an existing one. Enable multi-label in Settings to allow this.", parent=self.root)
                     return
-            else:
+            else: # Check for absolute duplicates even if overlap is allowed
                 for ann in entities_in_file:
                     if (ann['start_line'] == start_line and ann['start_char'] == start_char and
                         ann['end_line'] == end_line and ann['end_char'] == end_char and ann['tag'] == tag):
-                        self.status_var.set(f"This exact annotation already exists.")
+                        self.status_var.set("This exact annotation already exists.")
                         return
 
             entity_id = uuid.uuid4().hex
@@ -1332,23 +1350,11 @@ class TextAnnotator:
             self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
             self.apply_annotations_to_text()
             self.update_entities_list()
-            self.root.update_idletasks()
-
-            try:
-                new_iid = f"entity|{entity_id}|{adj_start_pos}|{adj_end_pos}|{tag}|{len(entities_in_file)-1}" # Heuristic for index
-                if self.entities_tree.exists(new_iid):
-                    self.entities_tree.selection_set(new_iid)
-                    self.entities_tree.focus(new_iid)
-                    self.entities_tree.see(new_iid)
-                    self.on_entity_select(None)
-            except Exception as e:
-                print(f"Error selecting new entity in list: {e}")
-
             self.status_var.set(f"Annotated: '{final_text[:30].replace(os.linesep, ' ')}...' as {tag}")
             self._update_button_states()
 
         except tk.TclError:
-            pass
+            pass # No selection exists
         except Exception as e:
             messagebox.showerror("Annotation Error", f"An unexpected error occurred:\n{e}", parent=self.root)
             traceback.print_exc()
