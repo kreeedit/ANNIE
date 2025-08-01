@@ -80,6 +80,7 @@ class TextAnnotator:
         self._click_pos = (0, 0)
         self._is_deleting = False
         self._is_annotating_ai = False
+        self._just_double_clicked = False
 
         # --- Sort Tracking ---
         self.entities_sort_column = None
@@ -255,6 +256,7 @@ class TextAnnotator:
 
         self.text_area.bind("<ButtonPress-1>", self._on_mouse_down)
         self.text_area.bind("<ButtonRelease-1>", self._on_highlight_release)
+        self.text_area.bind("<Double-Button-1>", self._on_double_click)
         self.text_area.bind("<Button-3>", self._on_text_right_click)
         self.text_area.bind("<Button-2>", self._on_text_right_click)
 
@@ -412,6 +414,9 @@ class TextAnnotator:
                 return "break"
 
     def _on_highlight_release(self, event):
+        """
+        Handles creating annotations on drag-release and removing them on a simple click.
+        """
         if not self.current_file_path: return
 
         CLICK_TIME_THRESHOLD = 0.5
@@ -420,16 +425,22 @@ class TextAnnotator:
         time_diff = time.time() - self._click_time
         move_diff = abs(event.x - self._click_pos[0]) + abs(event.y - self._click_pos[1])
 
+        # A drag-selection was made
         try:
             sel_start = self.text_area.index(tk.SEL_FIRST)
             sel_end = self.text_area.index(tk.SEL_LAST)
             if sel_start != sel_end:
                 self.annotate_selection()
-                return
+                return # Action is complete
         except tk.TclError:
-            pass
+            pass # No drag selection, proceed to check for a click
 
+        # A quick click was made (for removal ONLY)
         if time_diff < CLICK_TIME_THRESHOLD and move_diff < CLICK_MOVE_THRESHOLD:
+            # Check if this click was part of a double-click action. If so, ignore it.
+            if self._just_double_clicked:
+                self._just_double_clicked = False # Reset the flag for the next action
+                return
             original_state = self.text_area.cget('state')
             self.text_area.config(state=tk.NORMAL)
             try:
@@ -447,17 +458,47 @@ class TextAnnotator:
 
                 if clicked_entity_dict:
                     self._remove_entity_instance(clicked_entity_dict)
-                else:
-                    word_start = self.text_area.index(f"{click_index_str} wordstart")
-                    word_end = self.text_area.index(f"{click_index_str} wordend")
-                    if word_start != word_end:
-                        self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
-                        self.text_area.tag_add(tk.SEL, word_start, word_end)
-                        self.annotate_selection()
+                # The logic to create an annotation on a single click has been removed.
+
             except (tk.TclError, ValueError):
-                pass
+                pass # Ignore errors from clicking outside text
             finally:
+                if self.text_area.winfo_exists():
+                    self.text_area.config(state=original_state)
+
+    def _on_double_click(self, event):
+        """Selects and annotates the word under the cursor on double-click."""
+        self._just_double_clicked = True
+        if not self.current_file_path: return "break"
+
+        original_state = self.text_area.cget('state')
+        self.text_area.config(state=tk.NORMAL)
+        try:
+            click_index_str = self.text_area.index(f"@{event.x},{event.y}")
+
+            # Check if the click was inside an existing annotation to prevent re-annotating
+            click_pos = tuple(map(int, click_index_str.split('.')))
+            entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
+            for entity in entities:
+                start_pos = (entity.get('start_line'), entity.get('start_char'))
+                end_pos = (entity.get('end_line'), entity.get('end_char'))
+                if start_pos <= click_pos < end_pos:
+                    return "break" # It's on an existing annotation, do nothing
+
+            # If not on an existing annotation, select and annotate the word
+            word_start = self.text_area.index(f"{click_index_str} wordstart")
+            word_end = self.text_area.index(f"{click_index_str} wordend")
+            if word_start != word_end:
+                self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
+                self.text_area.tag_add(tk.SEL, word_start, word_end)
+                self.annotate_selection()
+        except (tk.TclError, ValueError):
+            pass # Ignore clicks outside of text content
+        finally:
+            if self.text_area.winfo_exists():
                 self.text_area.config(state=original_state)
+
+        return "break" # Prevent default double-click actions (like selecting the line)
 
     def _remove_entity_instance(self, entity_to_remove):
         if not self.current_file_path or self.current_file_path not in self.annotations: return
