@@ -28,9 +28,10 @@ import traceback
 import time
 import threading
 import torch
+import queue
 
 # --- Constants ---
-SESSION_FILE_VERSION = "1.12"
+SESSION_FILE_VERSION = "1.13"
 
 
 class TextAnnotator:
@@ -71,6 +72,8 @@ class TextAnnotator:
         self._is_deleting = False
         self._is_annotating_ai = False
         self._just_double_clicked = False
+        self.last_used_ai_models = []  # Stores the last used models
+        self.current_ai_models = [] # Current models for this session
 
         # --- Sort Tracking ---
         self.entities_sort_column = None
@@ -97,6 +100,8 @@ class TextAnnotator:
         self.status_var = tk.StringVar(value="Ready. Open a directory or load a session.")
         self.status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.ai_status_queue = queue.Queue()
+        self._process_queue()
 
         # --- Initial UI Setup ---
         self._update_entity_tag_combobox()
@@ -109,7 +114,8 @@ class TextAnnotator:
         for i in range(10): # Binds keys 0-9
             self.root.bind(str(i), self._on_hotkey_press)
 
-        self.root.bind('a', lambda event: self.pre_annotate_with_ai())
+        # The 'a' hotkey now runs AI with the current settings without a dialog.
+        self.root.bind('a', lambda event: self.run_ai_annotation_from_hotkey())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -139,8 +145,8 @@ class TextAnnotator:
                 for iid in selected_iids:
                     try:
                         parts = iid.split('|')
-                        entity_id, start_pos, end_pos, old_tag = parts[1], parts[2], parts[3], parts[4]
-                        selection_info.add((entity_id, start_pos, end_pos))
+                        entity_id, start_pos, old_tag = parts[1], parts[2], parts[4]
+                        selection_info.add((entity_id, start_pos))
                         for entity_dict in entities_in_file:
                             if (entity_dict['id'] == entity_id and
                                 f"{entity_dict['start_line']}.{entity_dict['start_char']}" == start_pos and
@@ -187,7 +193,7 @@ class TextAnnotator:
         self.settings_menu.add_command(label="Save Tag/Relation Schema...", command=self.save_schema)
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
-        self.settings_menu.add_command(label="Pre-annotate with AI...", command=self.pre_annotate_with_ai)
+        self.settings_menu.add_command(label="Pre-annotate with AI...", command=self._show_ai_settings_dialog) # This now always opens the dialog
         self.settings_menu.add_separator()
         self.settings_menu.add_checkbutton(
             label="Allow Multi-label & Overlapping Annotations",
@@ -451,7 +457,6 @@ class TextAnnotator:
 
                 if clicked_entity_dict:
                     self._remove_entity_instance(clicked_entity_dict)
-                # The logic to create an annotation on a single click has been removed.
 
             except (tk.TclError, ValueError):
                 pass # Ignore errors from clicking outside text
@@ -511,8 +516,8 @@ class TextAnnotator:
         entity_tag_being_removed = entities_list[entity_index_to_remove].get('tag', 'N/A')
 
         confirm = messagebox.askyesno("Confirm Removal",
-                                      f"Remove annotation for '{entity_text}...' ({entity_tag_being_removed})?",
-                                      parent=self.root)
+                                     f"Remove annotation for '{entity_text}...' ({entity_tag_being_removed})?",
+                                     parent=self.root)
         if not confirm:
             self.status_var.set("Removal cancelled.")
             return
@@ -824,6 +829,8 @@ class TextAnnotator:
         self.root.title("ANNIE - Annotation Interface")
         self.status_var.set("Ready. Open a directory or load a session.")
         self.text_area.config(state=tk.DISABLED)
+        self.last_used_ai_models = []
+        self.current_ai_models = []
 
     def load_next_file(self):
         if 0 <= self.current_file_index < len(self.files_list) - 1:
@@ -899,7 +906,9 @@ class TextAnnotator:
             "tag_colors": self.tag_colors,
             "annotations": self.annotations,
             "extend_to_word": self.extend_to_word.get(),
-            "allow_multilabel_overlap": self.allow_multilabel_overlap.get()
+            "allow_multilabel_overlap": self.allow_multilabel_overlap.get(),
+            "last_used_ai_models": self.last_used_ai_models,
+            "current_ai_models": self.current_ai_models
         }
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
@@ -914,10 +923,16 @@ class TextAnnotator:
 
         except Exception as e:
             messagebox.showerror("Save Session Error", f"Could not write session file:\n{e}", parent=self.root)
+
     def load_session(self):
         if self._has_unsaved_changes():
-            if not messagebox.askyesno("Unsaved Changes", "You have unsaved changes.\nDiscard and load session?", parent=self.root):
+            response = messagebox.askyesnocancel("Unsaved Changes", "You have unsaved changes.\nDiscard and load session?", parent=self.root)
+            if response is None:
                 return
+            if response:
+                self.save_session()
+                if not self.session_save_path:
+                    return
 
         load_path = filedialog.askopenfilename(
             filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root
@@ -952,6 +967,8 @@ class TextAnnotator:
             self.extend_to_word.set(session_data.get("extend_to_word", False))
             self.allow_multilabel_overlap.set(session_data.get("allow_multilabel_overlap", True))
             self.session_save_path = load_path
+            self.last_used_ai_models = session_data.get("last_used_ai_models", [])
+            self.current_ai_models = session_data.get("current_ai_models", [])
 
             self.files_listbox.delete(0, tk.END)
             for file_path in self.files_list:
@@ -1162,7 +1179,7 @@ class TextAnnotator:
         if not import_path: return
 
         try:
-            # --- Step 1: Parse the file based on its type ---
+            # Parse the file based on its type
             parsed_docs, found_tags = [], set()
             if import_path.lower().endswith(".conll"):
                 parsed_docs, found_tags = self._parse_conll_into_documents(import_path)
@@ -1176,7 +1193,7 @@ class TextAnnotator:
                 messagebox.showinfo("Info", "No valid documents found in the import file.", parent=self.root)
                 return
 
-            # --- Step 2: Handle new tags ---
+            # Handle new tags
             new_tags = found_tags - set(self.entity_tags)
             if new_tags:
                 if messagebox.askyesno("New Tags Found", f"Found new tags: {', '.join(new_tags)}.\n\nAdd them to the session?"):
@@ -1188,14 +1205,14 @@ class TextAnnotator:
                     for doc in parsed_docs:
                         doc['annotations'] = [ann for ann in doc['annotations'] if ann['tag'] in approved_tags]
 
-            # --- Step 3: Get save location ---
+            # Get save location
             save_dir = self._ask_for_save_directory(os.path.dirname(import_path))
             if not save_dir:
                 self.status_var.set("Import cancelled.")
                 return
             os.makedirs(save_dir, exist_ok=True)
 
-            # --- Step 4: Save files and update UI ---
+            # Save files and update UI
             if not self.files_list and parsed_docs: self._reset_state()
 
             base_name_for_docs = os.path.basename(os.path.splitext(import_path)[0])
@@ -1217,7 +1234,7 @@ class TextAnnotator:
                     text = doc['text'][ann['start']:ann['end']]
 
                     final_annotations.append({'id': uuid.uuid4().hex, 'start_line': start_line, 'start_char': start_char,
-                                                'end_line': end_line, 'end_char': end_char, 'text': text, 'tag': ann['tag']})
+                                              'end_line': end_line, 'end_char': end_char, 'text': text, 'tag': ann['tag']})
                 self.annotations[save_path] = {"entities": final_annotations, "relations": []}
 
             self.files_listbox.delete(0, tk.END)
@@ -1232,7 +1249,6 @@ class TextAnnotator:
             traceback.print_exc()
 
     def _parse_conll_into_documents(self, file_path):
-        # This method remains the same as the last version you have
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
@@ -1606,7 +1622,7 @@ class TextAnnotator:
         'selection_hint' can be an index (for after deletion) or a set of data tuples
         (for after re-labeling).
         """
-        # --- 1. Clear and rebuild the list ---
+        # Clear and rebuild the list
         try: self.entities_tree.delete(*self.entities_tree.get_children())
         except Exception: pass
         self._entity_id_to_tree_iids.clear()
@@ -1636,7 +1652,7 @@ class TextAnnotator:
             self.entities_tree.insert("", tk.END, iid=tree_row_iid, values=values_tuple, tags=tree_tags_tuple)
             self._entity_id_to_tree_iids.setdefault(entity_id, []).append(tree_row_iid)
 
-        # --- 2. Intelligently restore selection and focus ---
+        # Intelligently restore selection and focus
         new_iids_to_select = []
         all_iids_after = self.entities_tree.get_children()
 
@@ -1909,7 +1925,7 @@ class TextAnnotator:
                     updated_items = list(listbox.get(0, tk.END))
                     listbox.delete(0, tk.END)
                     for i_val in sorted(updated_items, key=str.lower):
-                         listbox.insert(tk.END, i_val)
+                        listbox.insert(tk.END, i_val)
                     item_var.set("")
                 else:
                     messagebox.showwarning("Duplicate", f"'{item}' already exists.", parent=window)
@@ -1963,14 +1979,45 @@ class TextAnnotator:
         self._manage_items("Relation Types", self.relation_types, self._update_relation_type_combobox)
 
 
-
     # AI Pre-annotation Methods
     def _update_status_threadsafe(self, message):
         """Schedules a status bar update to make it thread-safe."""
-        self.root.after(0, self.status_var.set, message)
+        self.ai_status_queue.put(message)
 
-    def pre_annotate_with_ai(self, event=None):
-        """Triggers pre-annotation process in a separate thread with lazy-loaded dependencies."""
+    def _process_queue(self):
+        """Processes messages from the queue in the main thread."""
+        try:
+            while True:
+                message = self.ai_status_queue.get_nowait()
+                self.status_var.set(message)
+                self.root.update()
+        except queue.Empty:
+            pass
+        self.root.after(100, self._process_queue)
+
+    def run_ai_annotation_from_hotkey(self, event=None):
+        """
+        Runs AI annotation with the currently selected models, without opening a dialog.
+        This is bound to the 'a' key.
+        """
+        if self._is_annotating_ai:
+            self.status_var.set("AI annotation is already in progress.")
+            return
+        if not self.current_file_path:
+            messagebox.showwarning("No File", "Please load a file first.", parent=self.root)
+            return
+        if not self.current_ai_models:
+            messagebox.showwarning("No AI Models Set", "Please configure AI models first by going to Settings > Pre-annotate with AI...", parent=self.root)
+            return
+
+        # Start the process directly with the already configured models.
+        self._start_ai_annotation_process(self.current_ai_models)
+
+    def pre_annotate_with_ai(self):
+        """
+        This method is bound to the menu item. It always opens the dialog
+        to allow the user to modify settings before running.
+        """
         if self._is_annotating_ai:
             self.status_var.set("AI annotation is already in progress.")
             return
@@ -1978,35 +2025,141 @@ class TextAnnotator:
             messagebox.showwarning("No File", "Please load a file first.", parent=self.root)
             return
 
-        full_text = self.text_area.get("1.0", tk.END)
-        if not full_text.strip():
-            self.status_var.set("Cannot run AI on an empty file.")
-            return
+        # Always show the dialog when the menu item is clicked.
+        self._show_ai_settings_dialog()
 
+    def _show_ai_settings_dialog(self):
+        """
+        Creates and shows a dialog for AI model selection.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("AI Pre-annotation Settings")
+        dialog.geometry("500x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = tk.Frame(dialog, padx=10, pady=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(frame, text="Selected Models (max 2):").pack(anchor=tk.W, pady=(0, 5))
+
+        # Listbox to show selected models
+        selected_models_frame = tk.Frame(frame)
+        selected_models_frame.pack(fill=tk.X)
+        self.selected_models_listbox = tk.Listbox(selected_models_frame, height=2, exportselection=False)
+        self.selected_models_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        selected_models_scrollbar = tk.Scrollbar(selected_models_frame, command=self.selected_models_listbox.yview)
+        selected_models_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.selected_models_listbox.config(yscrollcommand=selected_models_scrollbar.set)
+
+        # Initialize the listbox with the currently active models
+        # Use a copy to prevent modifying the main list directly
+        for model in self.current_ai_models:
+            self.selected_models_listbox.insert(tk.END, model)
+
+        def add_model_to_list(model_name):
+            model_name = model_name.strip()
+            if not model_name or model_name in self.selected_models_listbox.get(0, tk.END):
+                return
+            if self.selected_models_listbox.size() >= 2:
+                messagebox.showwarning("Limit Exceeded", "You can only select up to 2 models.", parent=dialog)
+                return
+            self.selected_models_listbox.insert(tk.END, model_name)
+
+        def remove_selected_model():
+            selection = self.selected_models_listbox.curselection()
+            if selection:
+                self.selected_models_listbox.delete(selection[0])
+
+        # Add/Remove buttons for the listbox
+        listbox_buttons_frame = tk.Frame(frame)
+        listbox_buttons_frame.pack(fill=tk.X, pady=(5, 10))
+        tk.Button(listbox_buttons_frame, text="Remove Selected", command=remove_selected_model).pack(side=tk.RIGHT)
+
+        # Model sources section
+        tk.Label(frame, text="Choose a pre-trained model:").pack(anchor=tk.W, pady=(10, 5))
+        models_frame = tk.Frame(frame)
+        models_frame.pack(fill=tk.X)
+
+        # Combobox for pre-defined models
+        common_models = [
+            "Babelscape/wikineural-multilingual-ner",
+            "dslim/bert-base-NER",
+            "magistermilitum/roberta-multilingual-medieval-ner"
+        ]
+        model_var = tk.StringVar(value="")
+        model_combo = ttk.Combobox(models_frame, textvariable=model_var, values=common_models, state="readonly")
+        model_combo.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,5))
+        tk.Button(models_frame, text="Add", command=lambda: add_model_to_list(model_var.get())).pack(side=tk.LEFT)
+
+        # Entry for custom models
+        tk.Label(frame, text="Custom model from Hugging Face:").pack(anchor=tk.W, pady=(10, 5))
+        custom_model_var = tk.StringVar(value="")
+        custom_model_entry = tk.Entry(frame, textvariable=custom_model_var)
+        custom_model_entry.pack(fill=tk.X)
+        tk.Button(frame, text="Add Custom", command=lambda: add_model_to_list(custom_model_var.get())).pack(anchor=tk.W, pady=(5,10))
+
+        def on_start_annotate():
+            model_names = list(self.selected_models_listbox.get(0, tk.END))
+            if not model_names:
+                messagebox.showwarning("No Model Selected", "Please select or enter at least one model.", parent=dialog)
+
+                return
+
+            dialog.destroy()
+            self._set_ai_models(model_names) # Set the current models
+            self._start_ai_annotation_process(self.current_ai_models) # Start the process with the new setting
+
+        # Buttons
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        tk.Button(btn_frame, text="Annotate", command=on_start_annotate).pack(side=tk.RIGHT)
+        tk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+
+        dialog.wait_window()
+
+    def _set_ai_models(self, model_names):
+        """Sets the current models and updates the history list."""
+        self.current_ai_models = model_names
+        # Update the last used models list
+        for name in model_names:
+            if name in self.last_used_ai_models:
+                self.last_used_ai_models.remove(name)
+            self.last_used_ai_models.insert(0, name)
+        self.last_used_ai_models = self.last_used_ai_models[:5] # Keep the 5 most recent
+
+
+    def _start_ai_annotation_process(self, model_names):
+        """Starts the AI annotation process in a separate thread."""
         self._is_annotating_ai = True
         self.settings_menu.entryconfig("Pre-annotate with AI...", state="disabled")
-        self.status_var.set("Loading AI dependencies...")
-        self.root.update()
+        self._update_status_threadsafe(f"Loading AI model '{model_names[0]}'...")
+
+        full_text = self.text_area.get("1.0", tk.END)
+        pipelines = []
 
         try:
-            # Lazy-load transformers and torch
-            from transformers import pipeline
-            import torch
+            from transformers import pipeline, AutoTokenizer
             AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-            ner_pipeline = pipeline(
-                "token-classification",
-                model="Babelscape/wikineural-multilingual-ner",
-                aggregation_strategy="max",
-                device=AI_DEVICE
-            )
-            tokenizer = ner_pipeline.tokenizer
-            self.status_var.set(f"AI model loaded on {AI_DEVICE.upper()}. Starting annotation...")
-            self.root.update()
 
-            # Start the AI processing in a separate thread
+            for i, model_name in enumerate(model_names):
+                self._update_status_threadsafe(f"Loading AI model '{model_name}' ({i+1}/{len(model_names)})...")
+
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                ner_pipeline = pipeline(
+                    "token-classification",
+                    model=model_name,
+                    tokenizer=tokenizer,
+                    aggregation_strategy="max",
+                    device=AI_DEVICE
+                )
+                pipelines.append(ner_pipeline)
+
+            self._update_status_threadsafe("AI models loaded. Starting annotation...")
+
             threading.Thread(
                 target=self._run_ai_model,
-                args=(full_text, ner_pipeline, tokenizer),
+                args=(full_text, pipelines),
                 daemon=True
             ).start()
 
@@ -2018,76 +2171,162 @@ class TextAnnotator:
                 "The 'transformers' and 'torch' libraries are required.\nPlease install: pip install transformers torch",
                 parent=self.root
             )
-            self.status_var.set("AI pre-annotation failed due to missing libraries.")
+            self._update_status_threadsafe("AI pre-annotation failed due to missing libraries.")
+        except Exception as e:
+            self._is_annotating_ai = False
+            self.settings_menu.entryconfig("Pre-annotate with AI...", state="normal")
+            messagebox.showerror(
+                "Model Load Error",
+                f"Failed to load one or more models. Please check the model name(s) and internet connection.\n\nError: {e}",
+                parent=self.root
+            )
+            self._update_status_threadsafe("AI pre-annotation failed due to model loading error.")
+            traceback.print_exc()
 
-    def _run_ai_model(self, full_text, ner_pipeline, tokenizer):
+    def _run_ai_model(self, full_text, pipelines):
         """
-        Applies a NER model to long text using a token-based sliding window,
-        relying on the pipeline's aggregation for correctness.
+        Applies NER models to long text and merges the results.
         """
         try:
-            # Configuration
-            label_map = {"PER": "Person", "ORG": "Organization", "LOC": "Location"}
-            max_length = 512  # The hard limit for BERT-style models
-            stride = 128      # How many tokens to overlap between chunks
+            label_map = {
+                "PER": "Person", "I-PER": "Person", "B-PER": "Person",
+                "ORG": "Organization", "I-ORG": "Organization", "B-ORG": "Organization",
+                "LOC": "Location", "I-LOC": "Location", "B-LOC": "Location",
+                "DATE": "Date", "I-DATE": "Date", "B-DATE": "Date",
+                "MISC": "Other", "I-MISC": "Other", "B-MISC": "Other"
+            }
 
-            AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-            self._update_status_threadsafe(f"Annotating on {AI_DEVICE.upper()}...")
+            all_detected_entities = []
 
-            # Tokenize the entire document once
-            encoding = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False)
-            all_offsets = encoding['offset_mapping']
+            for i, ner_pipeline in enumerate(pipelines):
+                self._update_status_threadsafe(f"Annotating with model {i+1}/{len(pipelines)}...")
 
-            all_entities = []
-            num_tokens = len(encoding['input_ids'])
-            num_chunks = -(-num_tokens // (max_length - stride)) if (max_length - stride) > 0 else 1
+                # We will process the whole text at once if possible, or chunk if needed.
+                # The tokenizer used for chunking is the one from the first pipeline,
+                # as all models are assumed to be from Hugging Face and have a tokenizer.
+                tokenizer = ner_pipeline.tokenizer
+                max_length = tokenizer.model_max_length if hasattr(tokenizer, 'model_max_length') else 512
+                stride = 128
 
-            # Process text in overlapping token-based chunks
-            for i in range(0, num_tokens, max_length - stride):
-                self._update_status_threadsafe(f"Annotating chunk {i // (max_length - stride) + 1}/{num_chunks}...")
+                if len(full_text) < max_length * 2: # Simple text, no need for chunking
+                    chunk_results = ner_pipeline(full_text)
+                    for entity in chunk_results:
+                        tag = label_map.get(entity.get("entity_group"))
+                        if not tag or tag not in self.entity_tags: continue
 
-                start_token_idx = i
-                end_token_idx = min(i + max_length, num_tokens)
+                        start_offset_raw = entity['start']
+                        end_offset_raw = entity['end']
 
-                if start_token_idx >= end_token_idx: continue
+                        # Fix the whitespace issue
+                        entity_text_raw = full_text[start_offset_raw:end_offset_raw]
+                        lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
+                        rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
 
-                # Use the offset mapping to get the precise character slice for this token window
-                chunk_start_char = all_offsets[start_token_idx][0]
-                chunk_end_char = all_offsets[end_token_idx - 1][1]
-                chunk_text = full_text[chunk_start_char:chunk_end_char]
+                        start_offset_clean = start_offset_raw + lstrip_len
+                        end_offset_clean = end_offset_raw - rstrip_len
 
-                if not chunk_text.strip(): continue
+                        final_word = full_text[start_offset_clean:end_offset_clean]
+                        if not final_word.strip(): continue
 
-                # Run the pipeline on the text chunk
-                chunk_results = ner_pipeline(chunk_text)
+                        start_pos = self._char_offset_to_tkinter_index(full_text, start_offset_clean)
+                        end_pos = self._char_offset_to_tkinter_index(full_text, end_offset_clean)
+                        start_line, start_char = map(int, start_pos.split("."))
+                        end_line, end_char = map(int, end_pos.split("."))
 
-                for entity in chunk_results:
-                    tag = label_map.get(entity["entity_group"])
-                    if not tag or tag not in self.entity_tags: continue
+                        # Check if the text matches the clean text
+                        if self.text_area.get(start_pos, end_pos).strip() != final_word.strip():
+                            # This is a fallback in case the offset mapping is tricky
+                            start_pos = self._find_start_of_word(full_text, start_offset_clean)
+                            end_pos = self._find_end_of_word(full_text, end_offset_clean)
+                            start_line, start_char = map(int, start_pos.split('.'))
+                            end_line, end_char = map(int, end_pos.split('.'))
+                            final_word = self.text_area.get(start_pos, end_pos).strip()
+                            if not final_word: continue
 
-                    # Convert the entity's chunk-relative offsets to absolute document offsets
-                    absolute_start = chunk_start_char + entity['start']
-                    absolute_end = chunk_start_char + entity['end']
+                        new_ann = {
+                            "id": uuid.uuid4().hex,
+                            "start_line": start_line, "start_char": start_char,
+                            "end_line": end_line, "end_char": end_char,
+                            "text": final_word, "tag": tag, "propagated": True,
+                        }
+                        all_detected_entities.append(new_ann)
 
-                    # Use the absolute offsets to get the precise text and clean it
-                    final_word = full_text[absolute_start:absolute_end]
-                    if not final_word.strip(): continue
+                else: # Chunking for long texts
+                    encoding = tokenizer(
+                        full_text,
+                        return_offsets_mapping=True,
+                        add_special_tokens=False,
+                        truncation=False
+                    )
+                    all_offsets = encoding['offset_mapping']
+                    all_tokens = encoding['input_ids']
 
-                    start_pos = self._char_offset_to_tkinter_index(full_text, absolute_start)
-                    end_pos = self._char_offset_to_tkinter_index(full_text, absolute_end)
-                    start_line, start_char = map(int, start_pos.split("."))
-                    end_line, end_char = map(int, end_pos.split("."))
+                    num_tokens = len(all_tokens)
+                    num_chunks = -(-num_tokens // (max_length - stride)) if (max_length - stride) > 0 else 1
 
-                    new_ann = {
-                        "id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
-                        "end_line": end_line, "end_char": end_char, "text": final_word,
-                        "tag": tag, "propagated": True,
-                    }
-                    all_entities.append(new_ann)
+                    for j in range(0, num_tokens, max_length - stride):
+                        self._update_status_threadsafe(f"Model {i+1}/{len(pipelines)}: Chunk {j // (max_length - stride) + 1}/{num_chunks}...")
 
-            # De-duplicate entities found in overlapping regions
+                        start_token_idx = j
+                        end_token_idx = min(j + max_length, num_tokens)
+                        if start_token_idx >= end_token_idx: continue
+
+                        chunk_start_char = all_offsets[start_token_idx][0]
+                        chunk_end_char = all_offsets[end_token_idx - 1][1]
+                        chunk_text = full_text[chunk_start_char:chunk_end_char]
+                        if not chunk_text.strip(): continue
+
+                        chunk_results = ner_pipeline(chunk_text)
+
+                        for entity in chunk_results:
+                            tag = label_map.get(entity.get("entity_group"))
+                            if not tag or tag not in self.entity_tags: continue
+
+                            start_offset_raw = chunk_start_char + entity['start']
+                            end_offset_raw = chunk_start_char + entity['end']
+
+                            # Fix the whitespace issue
+                            entity_text_raw = full_text[start_offset_raw:end_offset_raw]
+                            lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
+                            rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
+
+                            start_offset_clean = start_offset_raw + lstrip_len
+                            end_offset_clean = end_offset_raw - rstrip_len
+
+                            final_word = full_text[start_offset_clean:end_offset_clean]
+                            if not final_word.strip(): continue
+
+                            start_pos = self._char_offset_to_tkinter_index(full_text, start_offset_clean)
+                            end_pos = self._char_offset_to_tkinter_index(full_text, end_offset_clean)
+                            start_line, start_char = map(int, start_pos.split("."))
+                            end_line, end_char = map(int, end_pos.split("."))
+
+                            if self.extend_to_word.get():
+                                start_pos_word = self.text_area.index(f"{start_line}.{start_char} wordstart")
+                                end_pos_word = self.text_area.index(f"{end_line}.{end_char} wordend")
+                                start_line, start_char = map(int, start_pos_word.split("."))
+                                end_line, end_char = map(int, end_pos_word.split("."))
+
+                                start_offset_word = self._tkinter_index_to_char_offset(full_text, start_line, start_char)
+                                end_offset_word = self._tkinter_index_to_char_offset(full_text, end_line, end_char)
+                                final_word = full_text[start_offset_word:end_offset_word].strip()
+                                if not final_word: continue
+
+                            new_ann = {
+                                "id": uuid.uuid4().hex,
+                                "start_line": start_line,
+                                "start_char": start_char,
+                                "end_line": end_line,
+                                "end_char": end_char,
+                                "text": final_word,
+                                "tag": tag,
+                                "propagated": True,
+                            }
+                            all_detected_entities.append(new_ann)
+
+            # De-duplicate entities found across all models and overlapping regions
             unique_annotations_dict = {}
-            for ann in sorted(all_entities, key=lambda x: len(x['text']), reverse=True):
+            for ann in sorted(all_detected_entities, key=lambda x: len(x['text']), reverse=True):
                 key = (ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag'])
                 if key not in unique_annotations_dict:
                     unique_annotations_dict[key] = ann
@@ -2102,6 +2341,19 @@ class TextAnnotator:
             if hasattr(self, '_is_annotating_ai'):
                 self._is_annotating_ai = False
             self.root.after(0, self.settings_menu.entryconfig, "Pre-annotate with AI...", {"state": "normal"})
+
+    def _find_start_of_word(self, text, char_offset):
+        """Finds the start of the word from a given character offset."""
+        while char_offset > 0 and text[char_offset-1].isalnum():
+            char_offset -= 1
+        return self._char_offset_to_tkinter_index(text, char_offset)
+
+    def _find_end_of_word(self, text, char_offset):
+        """Finds the end of the word from a given character offset."""
+        while char_offset < len(text) and text[char_offset].isalnum():
+            char_offset += 1
+        return self._char_offset_to_tkinter_index(text, char_offset)
+
 
     def _char_offset_to_tkinter_index(self, text, offset):
         """Helper function to convert a character offset to a Tkinter 'line.char' index."""
@@ -2120,9 +2372,22 @@ class TextAnnotator:
             entities_list = self.annotations.setdefault(self.current_file_path, {}).setdefault("entities", [])
             added_count = 0
             for ann in new_annotations:
-                if not self._is_overlapping_in_list(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], entities_list):
+                # Check for exact duplicate before adding
+                is_duplicate = any(
+                    e['start_line'] == ann['start_line'] and
+                    e['start_char'] == ann['start_char'] and
+                    e['end_line'] == ann['end_line'] and
+                    e['end_char'] == ann['end_char'] and
+                    e['tag'] == ann['tag']
+                    for e in entities_list
+                )
+
+                if not is_duplicate and (self.allow_multilabel_overlap.get() or not self._is_overlapping_in_list(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], entities_list)):
                     entities_list.append(ann)
                     added_count += 1
+
+            # Sort the final list of entities for consistent display
+            entities_list.sort(key=lambda a: (a['start_line'], a['start_char']))
 
             self.apply_annotations_to_text()
             self.update_entities_list()
