@@ -140,13 +140,12 @@ class TextAnnotator:
 
             if selected_iids:
                 entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
-                selection_info = set() # Store info to find the items again after rebuild
+                selected_iids_to_restore = list(selected_iids)
 
-                for iid in selected_iids:
+                for iid in selected_iids_to_restore:
                     try:
                         parts = iid.split('|')
-                        entity_id, start_pos, old_tag = parts[1], parts[2], parts[4]
-                        selection_info.add((entity_id, start_pos))
+                        entity_id, start_pos, end_pos, old_tag = parts[1], parts[2], parts[3], parts[4]
                         for entity_dict in entities_in_file:
                             if (entity_dict['id'] == entity_id and
                                 f"{entity_dict['start_line']}.{entity_dict['start_char']}" == start_pos and
@@ -156,7 +155,14 @@ class TextAnnotator:
                     except IndexError: continue
 
                 self.apply_annotations_to_text()
-                self.update_entities_list(selection_hint=selection_info) # Pass the hint
+                # A selection_hint-et frissített adatokkal (ID, start_pos, end_pos) kell ellátni.
+                selection_info_for_rebuild = set()
+                for iid in selected_iids_to_restore:
+                    parts = iid.split('|')
+                    entity_id, start_pos, end_pos = parts[1], parts[2], parts[3]
+                    selection_info_for_rebuild.add((entity_id, start_pos, end_pos, new_tag))
+
+                self.update_entities_list(selection_hint=selection_info_for_rebuild)
                 self.status_var.set(f"Relabeled {len(selected_iids)} entit{'y' if len(selected_iids) == 1 else 'ies'} to '{new_tag}'")
             else:
                 self.selected_entity_tag.set(new_tag)
@@ -247,7 +253,8 @@ class TextAnnotator:
             xscrollcommand=scrollbar_text_x.set,
             undo=True, state=tk.DISABLED,
             borderwidth=1, relief="sunken",
-            insertbackground="black", insertwidth=2
+            insertbackground="black", insertwidth=2,
+            takefocus=False
         )
         self.text_area.pack(fill=tk.BOTH, expand=True)
         scrollbar_text_y.config(command=self.text_area.yview)
@@ -1656,14 +1663,15 @@ class TextAnnotator:
         new_iids_to_select = []
         all_iids_after = self.entities_tree.get_children()
 
-        if isinstance(selection_hint, int) and all_iids_after: # Hint is an index
+        if isinstance(selection_hint, int) and all_iids_after: # Del logic
             new_index = min(selection_hint, len(all_iids_after) - 1)
             new_iids_to_select.append(all_iids_after[new_index])
-        elif isinstance(selection_hint, set): # Hint is a set of data tuples
+
+        elif isinstance(selection_hint, set): # Labelling logic
             for iid in all_iids_after:
                 try:
                     parts = iid.split('|')
-                    key = (parts[1], parts[2], parts[3]) # (id, start, end)
+                    key = (parts[1], parts[2], parts[3], parts[4]) # (id, start, end, tag)
                     if key in selection_hint:
                         new_iids_to_select.append(iid)
                 except IndexError: continue
