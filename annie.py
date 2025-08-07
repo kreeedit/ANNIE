@@ -27,21 +27,11 @@ import re
 import traceback
 import time
 import threading
-
-# Attempt to import transformers, but don't make it a hard requirement to run the app (because I am running a training right now)
-try:
-    from transformers import pipeline
-    import torch
-    TRANSFORMERS_AVAILABLE = True
-except ImportError as e:
-    print(f"--> IMPORT ERROR: Failed to import AI libraries. Please check your installation.")
-    print(f"--> Error details: {e}")
-    TRANSFORMERS_AVAILABLE = False
-
+import torch
 
 # --- Constants ---
 SESSION_FILE_VERSION = "1.12"
-AI_DEVICE = "cpu"
+
 
 class TextAnnotator:
     """
@@ -1018,22 +1008,14 @@ class TextAnnotator:
             messagebox.showinfo("Info", "There are no annotations to export.", parent=self.root)
             return
 
-        # Simple dialog to choose format
-        import tkinter.simpledialog
-        format_choice = tkinter.simpledialog.askstring("Export Format", "Enter format (conll or spacy):", parent=self.root)
-
-        if not format_choice or format_choice.lower() not in ["conll", "spacy"]:
-            self.status_var.set("Export cancelled.")
-            return
-
-        format_choice = format_choice.lower()
-        file_types = [("CoNLL Files", "*.conll")] if format_choice == "conll" else [("JSONL Files", "*.jsonl")]
-        extension = ".conll" if format_choice == "conll" else ".jsonl"
-
         save_path = filedialog.asksaveasfilename(
-            title=f"Export Annotations as {format_choice.upper()}",
-            defaultextension=extension,
-            filetypes=file_types,
+            title="Export Annotations for Training",
+            initialdir=os.path.dirname(self.files_list[0]) if self.files_list else "",
+            filetypes=[
+                ("CoNLL Files", "*.conll"),
+                ("spaCy JSONL Files", "*.jsonl"),
+                ("All files", "*.*")
+            ],
             parent=self.root
         )
 
@@ -1042,10 +1024,15 @@ class TextAnnotator:
             return
 
         try:
-            if format_choice == "conll":
+            # Determine which export function to call based on the chosen file extension
+            if save_path.lower().endswith(".conll"):
                 self._export_as_conll(save_path)
-            elif format_choice == "spacy":
+            elif save_path.lower().endswith(".jsonl"):
                 self._export_as_spacy_jsonl(save_path)
+            else:
+                messagebox.showwarning("Unknown Format", "File was saved with an unknown extension. Please use '.conll' or '.jsonl'.", parent=self.root)
+                return
+
             messagebox.showinfo("Success", f"Annotations successfully exported to:\n{os.path.basename(save_path)}", parent=self.root)
             self.status_var.set(f"Exported annotations to {os.path.basename(save_path)}")
         except Exception as e:
@@ -1983,10 +1970,7 @@ class TextAnnotator:
         self.root.after(0, self.status_var.set, message)
 
     def pre_annotate_with_ai(self, event=None):
-        """Triggers pre-annotation process in a separate thread."""
-        if not TRANSFORMERS_AVAILABLE:
-            messagebox.showerror("Missing Libraries", "The 'transformers' and 'torch' libraries are required.\nPlease install: pip install transformers torch", parent=self.root)
-            return
+        """Triggers pre-annotation process in a separate thread with lazy-loaded dependencies."""
         if self._is_annotating_ai:
             self.status_var.set("AI annotation is already in progress.")
             return
@@ -2001,35 +1985,56 @@ class TextAnnotator:
 
         self._is_annotating_ai = True
         self.settings_menu.entryconfig("Pre-annotate with AI...", state="disabled")
-
-        self.status_var.set("Starting AI annotation...")
+        self.status_var.set("Loading AI dependencies...")
         self.root.update()
 
-        # The background thread now only needs the full text to do its own robust chunking.
-        threading.Thread(target=self._run_ai_model, args=(full_text,), daemon=True).start()
-
-    def _run_ai_model(self, full_text):
-        """
-        Loads a NER model and applies it to long text using a token-based
-        sliding window, relying on the pipeline's aggregation for correctness.
-        """
         try:
-            # Configuration
-            model_name = "Babelscape/wikineural-multilingual-ner"
-            label_map = {"PER": "Person", "ORG": "Organization", "LOC": "Location"}
-            max_length = 512 # The hard limit for BERT-style models
-            stride = 128     # How many tokens to overlap between chunks
-
-            self._update_status_threadsafe(f"Loading model on {AI_DEVICE.upper()}...")
+            # Lazy-load transformers and torch
+            from transformers import pipeline
+            import torch
+            AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
             ner_pipeline = pipeline(
                 "token-classification",
-                model=model_name,
-                aggregation_strategy="max", # Use the pipeline's robust aggregation
+                model="Babelscape/wikineural-multilingual-ner",
+                aggregation_strategy="max",
                 device=AI_DEVICE
             )
             tokenizer = ner_pipeline.tokenizer
+            self.status_var.set(f"AI model loaded on {AI_DEVICE.upper()}. Starting annotation...")
+            self.root.update()
 
-            # Tokenize the entire document once ---
+            # Start the AI processing in a separate thread
+            threading.Thread(
+                target=self._run_ai_model,
+                args=(full_text, ner_pipeline, tokenizer),
+                daemon=True
+            ).start()
+
+        except ImportError as e:
+            self._is_annotating_ai = False
+            self.settings_menu.entryconfig("Pre-annotate with AI...", state="normal")
+            messagebox.showerror(
+                "Missing Libraries",
+                "The 'transformers' and 'torch' libraries are required.\nPlease install: pip install transformers torch",
+                parent=self.root
+            )
+            self.status_var.set("AI pre-annotation failed due to missing libraries.")
+
+    def _run_ai_model(self, full_text, ner_pipeline, tokenizer):
+        """
+        Applies a NER model to long text using a token-based sliding window,
+        relying on the pipeline's aggregation for correctness.
+        """
+        try:
+            # Configuration
+            label_map = {"PER": "Person", "ORG": "Organization", "LOC": "Location"}
+            max_length = 512  # The hard limit for BERT-style models
+            stride = 128      # How many tokens to overlap between chunks
+
+            AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+            self._update_status_threadsafe(f"Annotating on {AI_DEVICE.upper()}...")
+
+            # Tokenize the entire document once
             encoding = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False)
             all_offsets = encoding['offset_mapping']
 
@@ -2053,7 +2058,7 @@ class TextAnnotator:
 
                 if not chunk_text.strip(): continue
 
-                # Run the pipeline on the text chunk; it will handle aggregation.
+                # Run the pipeline on the text chunk
                 chunk_results = ner_pipeline(chunk_text)
 
                 for entity in chunk_results:
@@ -2080,7 +2085,7 @@ class TextAnnotator:
                     }
                     all_entities.append(new_ann)
 
-            #  De-duplicate entities found in overlapping regions ---
+            # De-duplicate entities found in overlapping regions
             unique_annotations_dict = {}
             for ann in sorted(all_entities, key=lambda x: len(x['text']), reverse=True):
                 key = (ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag'])
