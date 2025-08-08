@@ -1738,12 +1738,18 @@ class TextAnnotator:
         if self._is_annotating_ai:
             self.status_var.set("AI annotation is already in progress.")
             return
+
         if not self.current_file_path:
             messagebox.showwarning("No File", "Please load a file first.", parent=self.root)
             return
+
         if not self.current_ai_models:
-            messagebox.showwarning("No AI Models Set", "Please configure AI models first by going to Settings > Pre-annotate with AI...", parent=self.root)
+            # If no models are configured, show the settings dialog.
+            # The dialog's own "Annotate" button will then call _start_ai_annotation_process.
+            self._show_ai_settings_dialog()
             return
+
+        # If models are already configured, start the process directly.
         self._start_ai_annotation_process(self.current_ai_models)
 
     def pre_annotate_with_ai(self):
