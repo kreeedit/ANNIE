@@ -1859,17 +1859,31 @@ class TextAnnotator:
         pipelines = []
         try:
             from transformers import pipeline, AutoTokenizer
-            AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
             for i, model_name in enumerate(model_names):
                 self._update_status_threadsafe(f"Loading AI model '{model_name}' ({i+1}/{len(model_names)})...")
                 tokenizer = AutoTokenizer.from_pretrained(model_name)
-                ner_pipeline = pipeline(
-                    "token-classification",
-                    model=model_name,
-                    tokenizer=tokenizer,
-                    aggregation_strategy="max",
-                    device=AI_DEVICE
-                )
+                try:
+                    # Try to load CUDA
+                    if torch.cuda.is_available():
+                        ner_pipeline = pipeline(
+                            "token-classification",
+                            model=model_name,
+                            tokenizer=tokenizer,
+                            aggregation_strategy="max",
+                            device="cuda"
+                        )
+                    else:
+                        raise RuntimeError("CUDA not available, back to CPU")
+                except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                    # Fallback to CPU if CUDA fails
+                    self._update_status_threadsafe(f"CUDA unavailable ({str(e)}), switching to CPU for model '{model_name}'...")
+                    ner_pipeline = pipeline(
+                        "token-classification",
+                        model=model_name,
+                        tokenizer=tokenizer,
+                        aggregation_strategy="max",
+                        device="cpu"
+                    )
                 pipelines.append(ner_pipeline)
             self._update_status_threadsafe("AI models loaded. Starting annotation...")
             threading.Thread(
