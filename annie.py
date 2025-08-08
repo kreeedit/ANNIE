@@ -1920,9 +1920,10 @@ class TextAnnotator:
     def _run_ai_model(self, full_text, pipelines):
         """
         Applies NER models to long text and merges the results.
-        Optimized with pre-computed line starts for faster offset conversion.
+        Correctly handles word-snapping for annotations, and handles long documents.
         """
         try:
+            from bisect import bisect_right
             label_map = {
                 "PER": "Person", "I-PER": "Person", "B-PER": "Person",
                 "ORG": "Organization", "I-ORG": "Organization", "B-ORG": "Organization",
@@ -1934,16 +1935,30 @@ class TextAnnotator:
             tokenizer = pipelines[0].tokenizer
             max_length = getattr(tokenizer, 'model_max_length', 512)
             stride = 128
-            # Optimized: Precompute line starts for faster offset to Tkinter index conversion
+
+            # Helper functions to find word boundaries directly on the text string
+            def find_start_of_word(text, offset):
+                while offset > 0 and text[offset-1].isalnum():
+                    offset -= 1
+                return offset
+
+            def find_end_of_word(text, offset):
+                while offset < len(text) and text[offset].isalnum():
+                    offset += 1
+                return offset
+
+            # Precompute line starts for faster offset to Tkinter index conversion
             line_starts = [0]
             for i, char in enumerate(full_text):
                 if char == '\n':
                     line_starts.append(i + 1)
+
             def offset_to_tkinter(offset):
                 line_idx = bisect_right(line_starts, offset) - 1
                 line = line_idx + 1
                 char = offset - line_starts[line_idx]
                 return f"{line}.{char}"
+
             if len(full_text) < max_length * 2:
                 for i, ner_pipeline in enumerate(pipelines):
                     self._update_status_threadsafe(f"Annotating with model {i+1}/{len(pipelines)}...")
@@ -1951,18 +1966,27 @@ class TextAnnotator:
                     for entity in chunk_results:
                         tag = label_map.get(entity.get("entity_group"))
                         if not tag or tag not in self.entity_tags: continue
+
                         start_offset_raw, end_offset_raw = entity['start'], entity['end']
                         entity_text_raw = full_text[start_offset_raw:end_offset_raw]
+
                         lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
                         rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
                         start_offset_clean = start_offset_raw + lstrip_len
                         end_offset_clean = end_offset_raw - rstrip_len
+
+                        if self.extend_to_word.get():
+                            start_offset_clean = find_start_of_word(full_text, start_offset_clean)
+                            end_offset_clean = find_end_of_word(full_text, end_offset_clean)
+
                         final_word = full_text[start_offset_clean:end_offset_clean]
                         if not final_word.strip(): continue
+
                         start_pos = offset_to_tkinter(start_offset_clean)
                         end_pos = offset_to_tkinter(end_offset_clean)
                         start_line, start_char = map(int, start_pos.split("."))
                         end_line, end_char = map(int, end_pos.split("."))
+
                         new_ann = {
                             "id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
                             "end_line": end_line, "end_char": end_char, "text": final_word,
@@ -1975,52 +1999,57 @@ class TextAnnotator:
                 tokens = encoding['input_ids']
                 num_tokens = len(tokens)
                 num_chunks = -(-num_tokens // (max_length - stride)) if (max_length - stride) > 0 else 1
+
                 for j in range(0, num_tokens, max_length - stride):
                     for i, ner_pipeline in enumerate(pipelines):
                         self._update_status_threadsafe(f"Model {i+1}/{len(pipelines)}: Chunk {j // (max_length - stride) + 1}/{num_chunks}...")
                         start_token_idx = j
                         end_token_idx = min(j + max_length, num_tokens)
                         if start_token_idx >= end_token_idx: continue
+
                         chunk_start_char = offsets[start_token_idx][0]
                         chunk_end_char = offsets[end_token_idx - 1][1]
                         chunk_text = full_text[chunk_start_char:chunk_end_char]
                         if not chunk_text.strip(): continue
+
                         chunk_results = ner_pipeline(chunk_text)
                         for entity in chunk_results:
                             tag = label_map.get(entity.get("entity_group"))
                             if not tag or tag not in self.entity_tags: continue
+
                             start_offset_raw = chunk_start_char + entity['start']
                             end_offset_raw = chunk_start_char + entity['end']
                             entity_text_raw = full_text[start_offset_raw:end_offset_raw]
+
                             lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
                             rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
                             start_offset_clean = start_offset_raw + lstrip_len
                             end_offset_clean = end_offset_raw - rstrip_len
+
+                            if self.extend_to_word.get():
+                                start_offset_clean = find_start_of_word(full_text, start_offset_clean)
+                                end_offset_clean = find_end_of_word(full_text, end_offset_clean)
+
                             final_word = full_text[start_offset_clean:end_offset_clean]
                             if not final_word.strip(): continue
+
                             start_pos = offset_to_tkinter(start_offset_clean)
                             end_pos = offset_to_tkinter(end_offset_clean)
                             start_line, start_char = map(int, start_pos.split("."))
                             end_line, end_char = map(int, end_pos.split("."))
-                            if self.extend_to_word.get():
-                                start_pos_word = self.text_area.index(f"{start_line}.{start_char} wordstart")
-                                end_pos_word = self.text_area.index(f"{end_line}.{end_char} wordend")
-                                start_line, start_char = map(int, start_pos_word.split("."))
-                                end_line, end_char = map(int, end_pos_word.split("."))
-                                start_offset_word = self._tkinter_index_to_char_offset(full_text, start_line, start_char)
-                                end_offset_word = self._tkinter_index_to_char_offset(full_text, end_line, end_char)
-                                final_word = full_text[start_offset_word:end_offset_word].strip()
-                                if not final_word: continue
+
                             new_ann = {
                                 "id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
                                 "end_line": end_line, "end_char": end_char, "text": final_word,
                                 "tag": tag, "propagated": True
                             }
                             all_detected_entities.append(new_ann)
+
             # Optimized: Use a dictionary for O(1) deduplication
             unique_annotations = {(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag']): ann for ann in all_detected_entities}
             new_annotations = list(unique_annotations.values())
             self.root.after(0, self._update_ui_with_ai_annotations, new_annotations)
+
         except Exception as e:
             self.root.after(0, self.status_var.set, "AI pre-annotation failed. See console for details.")
             traceback.print_exc()
