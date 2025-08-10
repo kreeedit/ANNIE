@@ -14,6 +14,7 @@ Double-Click/Highlight to Annotate and Single-Click to Remove.
 Includes check to prevent re-annotating on double-click of existing annotation.
 Adds optional multi-label annotation, allowing multiple and/or overlapping annotations.
 Adds a persistent bottom status bar with a ttk.Progressbar that shows ongoing activity.
+Optionally detele particular tags in the whole corpus
 """
 
 import os
@@ -453,7 +454,7 @@ class TextAnnotator:
                         break
 
                 if clicked_entity_dict:
-                    self._remove_entity_instance(clicked_entity_dict) # <<< MODIFIED >>>
+                    self._remove_entity_instance(clicked_entity_dict)
             except (tk.TclError, ValueError):
                 pass
             finally:
@@ -498,7 +499,6 @@ class TextAnnotator:
                 self.text_area.config(state=original_state)
         return "break"
 
-    # <<< MODIFIED/SIMPLIFIED >>>
     def _remove_entity_instance(self, entity_to_remove):
         """
         Finds a clicked entity and passes it to the central deletion handler.
@@ -1351,7 +1351,7 @@ class TextAnnotator:
         """Removes all instances of a specific text-tag pair from the entire corpus, case-insensitively."""
         if not messagebox.askokcancel("Permanent Deletion",
                                       f"Are you sure you want to delete ALL occurrences of\n\n"
-                                      f"Text: '{text_to_delete}' (case-insensitive)\n" # MODIFIED TEXT
+                                      f"Text: '{text_to_delete}' (case-insensitive)\n"
                                       f"Tag: '{tag_to_delete}'\n\n"
                                       f"from the entire corpus? This action cannot be undone.",
                                       icon='warning', parent=self.root):
@@ -1366,7 +1366,6 @@ class TextAnnotator:
         affected_files = set()
 
         # Normalize the search text to lowercase
-        # <<< MODIFIED >>>
         normalized_text_to_delete = text_to_delete.strip().lower()
 
         for file_path, data in self.annotations.items():
@@ -1380,7 +1379,6 @@ class TextAnnotator:
             entities_to_keep = []
             for entity in entities:
                 # Compare both the entity text and the search text in lowercase
-                # <<< MODIFIED >>>
                 if entity.get('text', '').strip().lower() == normalized_text_to_delete and entity.get('tag') == tag_to_delete:
                     ids_to_check_for_relation_removal.add(entity['id'])
                     removed_count += 1
