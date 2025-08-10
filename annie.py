@@ -1358,10 +1358,12 @@ class TextAnnotator:
             self.status_var.set("Corpus-wide deletion cancelled.")
             return
 
+        # --- UI Preparation ---
         self.status_var.set("Performing corpus-wide deletion...")
         self.progress_bar.start()
         self.root.update()
 
+        # Initialize a counter for the total number of removed annotations.
         removed_count = 0
         affected_files = set()
 
@@ -1376,19 +1378,22 @@ class TextAnnotator:
             initial_entity_count = len(entities)
             ids_to_check_for_relation_removal = set()
 
+            # --- Entity Filtering ---
             entities_to_keep = []
             for entity in entities:
-                # Compare both the entity text and the search text in lowercase
+                # Check if the entity's text (normalized) and tag match the deletion criteria.
                 if entity.get('text', '').strip().lower() == normalized_text_to_delete and entity.get('tag') == tag_to_delete:
                     ids_to_check_for_relation_removal.add(entity['id'])
                     removed_count += 1
                 else:
                     entities_to_keep.append(entity)
 
+            # Check if the number of entities has changed.
             if len(entities_to_keep) < initial_entity_count:
                 affected_files.add(file_path)
                 data["entities"] = entities_to_keep
 
+                # --- Orphaned Relation Cleanup ---
                 remaining_ids = {e['id'] for e in entities_to_keep}
                 orphaned_ids = ids_to_check_for_relation_removal - remaining_ids
 
