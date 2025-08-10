@@ -1784,10 +1784,11 @@ class TextAnnotator:
         """
         propagated_count, affected_files = 0, set()
         allow_overlap = self.allow_multilabel_overlap.get()
+        lower_case_text_to_tag_map = {text.lower(): tag for text, tag in text_to_tag_map.items()}
         sorted_texts = sorted(text_to_tag_map.keys(), key=len, reverse=True)
         # Optimized: Combine all patterns into a single regex with alternation
         pattern = '|'.join(r'\b' + re.escape(text) + r'\b' for text in sorted_texts)
-        regex = re.compile(pattern)
+        regex = re.compile(pattern, re.IGNORECASE)
         self.status_var.set(f"Starting {source_description}..."); self.root.update()
         file_contents = {}
         # Optimized: Read all files into memory once
@@ -1810,7 +1811,7 @@ class TextAnnotator:
 
             for match in regex.finditer(content):
                 matched_text = match.group()
-                tag = text_to_tag_map.get(matched_text)
+                tag = lower_case_text_to_tag_map.get(matched_text.lower())
                 if not tag:
                     continue
                 start_index, end_index = match.span()
@@ -2297,7 +2298,7 @@ class TextAnnotator:
                 )
                 if not is_duplicate and (self.allow_multilabel_overlap.get() or not self._is_overlapping_in_list(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], entities_list)):
                     entities_list.append(ann)
-                    self._add_to_entity_lookup_map(ann) # NEW: Update lookup map
+                    self._add_to_entity_lookup_map(ann) # Update lookup map
                     added_count += 1
 
             entities_list.sort(key=lambda a: (a['start_line'], a['start_char']))
