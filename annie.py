@@ -56,7 +56,7 @@ class TextAnnotator:
         self.annotations = {}
         self.session_save_path = None
 
-        # --- NEW: Optimized Data Structures ---
+        # --- Optimized Data Structures ---
         self.line_start_offsets = [0] # Stores character offsets for the start of each line
         self._entity_lookup_map = {} # Maps unique entity keys to entity dicts for fast lookup
 
@@ -100,27 +100,16 @@ class TextAnnotator:
 
         # --- Status Bar and Progress Bar Setup (Packed first to be at the bottom) ---
         self.status_var = tk.StringVar(value="Ready. Open a directory or load a session.")
-
         status_frame = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # The fix is here:
-        # We create an inner frame to hold the label and progress bar, and use a fixed height.
-        # By setting a fixed height and packing with `fill=tk.Y`, the frame won't expand vertically.
         status_inner_frame = tk.Frame(status_frame, height=25)
         status_inner_frame.pack(fill=tk.X, expand=True)
-        status_inner_frame.pack_propagate(False) # Prevents the frame from resizing to fit its contents
-
-        # Use a generic gray color to avoid platform-specific errors
+        status_inner_frame.pack_propagate(False)
         status_label = tk.Label(status_inner_frame, textvariable=self.status_var, anchor=tk.W, background='gray85')
         status_label.pack(side=tk.LEFT, padx=5, pady=2, fill=tk.X, expand=True)
-
-        self.progress_bar = ttk.Progressbar(
-            status_inner_frame, orient='horizontal', mode='indeterminate', length=200
-        )
+        self.progress_bar = ttk.Progressbar(status_inner_frame, orient='horizontal', mode='indeterminate', length=200)
         self.progress_bar.pack(side=tk.RIGHT, padx=5, pady=2, fill=tk.X, expand=False)
         self.progress_bar.stop()
-
         self.ai_status_queue = queue.Queue()
         self._process_queue()
 
@@ -165,10 +154,7 @@ class TextAnnotator:
 
             if selected_iids:
                 if not self.current_file_path: return
-
-                entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
                 entities_to_relabel = []
-
                 # Find the entity dictionaries for the selected treeview rows
                 for iid in selected_iids:
                     try:
@@ -181,31 +167,26 @@ class TextAnnotator:
                             entities_to_relabel.append(entity)
                     except (ValueError, IndexError):
                         continue
-
                 if not entities_to_relabel:
                     self.status_var.set("No valid entities selected for relabeling.")
                     return
-
                 # Update the tags and then the lookup map
                 for entity_dict in entities_to_relabel:
                     # Remove old entry from map
                     old_key = (entity_dict['id'], entity_dict['start_line'], entity_dict['start_char'],
                                entity_dict['end_line'], entity_dict['end_char'], entity_dict['tag'])
                     self._entity_lookup_map.pop(old_key, None)
-
                     # Update tag
                     entity_dict['tag'] = new_tag
-
                     # Add new entry to map
                     new_key = (entity_dict['id'], entity_dict['start_line'], entity_dict['start_char'],
                                entity_dict['end_line'], entity_dict['end_char'], new_tag)
                     self._entity_lookup_map[new_key] = entity_dict
 
                 self.apply_annotations_to_text()
-
                 # Rebuild the list, passing the old selection keys so they can be re-selected
                 selection_info_for_rebuild = {(e['id'], f"{e['start_line']}.{e['start_char']}",
-                                                f"{e['end_line']}.{e['end_char']}", new_tag) for e in entities_to_relabel}
+                                               f"{e['end_line']}.{e['end_char']}", new_tag) for e in entities_to_relabel}
                 self.update_entities_list(selection_hint=selection_info_for_rebuild)
                 self.status_var.set(f"Relabeled {len(entities_to_relabel)} entit{'y' if len(entities_to_relabel) == 1 else 'ies'} to '{new_tag}'")
             else:
@@ -243,16 +224,13 @@ class TextAnnotator:
         self.settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
         self.settings_menu.add_command(label="Pre-annotate with AI...", command=self.pre_annotate_with_ai)
         self.settings_menu.add_separator()
-        self.settings_menu.add_checkbutton(
-            label="Allow Multi-label & Overlapping Annotations",
-            variable=self.allow_multilabel_overlap,
-            onvalue=True, offvalue=False
-        )
+        self.settings_menu.add_checkbutton(label="Allow Multi-label & Overlapping Annotations",
+                                           variable=self.allow_multilabel_overlap,
+                                           onvalue=True, offvalue=False)
         menubar.add_cascade(label="Settings", menu=self.settings_menu)
         self.root.config(menu=menubar)
 
     def create_layout(self):
-        # Now pack the main content frame to fill the space above the status bar.
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         left_frame = tk.Frame(main_frame, width=200)
@@ -270,9 +248,9 @@ class TextAnnotator:
         nav_frame = tk.Frame(left_frame)
         nav_frame.pack(fill=tk.X, pady=5)
         self.prev_btn = tk.Button(nav_frame, text="Previous", command=self.load_previous_file, state=tk.DISABLED)
-        self.prev_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,2))
+        self.prev_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         self.next_btn = tk.Button(nav_frame, text="Next", command=self.load_next_file, state=tk.DISABLED)
-        self.next_btn.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2,0))
+        self.next_btn.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         right_frame = tk.Frame(main_frame)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         right_main_pane = tk.PanedWindow(right_frame, orient=tk.VERTICAL, sashrelief=tk.RAISED, sashwidth=6)
@@ -285,15 +263,10 @@ class TextAnnotator:
         scrollbar_text_y.pack(side=tk.RIGHT, fill=tk.Y)
         scrollbar_text_x = tk.Scrollbar(text_frame, orient=tk.HORIZONTAL)
         scrollbar_text_x.pack(side=tk.BOTTOM, fill=tk.X)
-        self.text_area = tk.Text(
-            text_frame, wrap=tk.WORD,
-            yscrollcommand=scrollbar_text_y.set,
-            xscrollcommand=scrollbar_text_x.set,
-            undo=True, state=tk.DISABLED,
-            borderwidth=1, relief="sunken",
-            insertbackground="black", insertwidth=2,
-            takefocus=False
-        )
+        self.text_area = tk.Text(text_frame, wrap=tk.WORD, yscrollcommand=scrollbar_text_y.set,
+                                 xscrollcommand=scrollbar_text_x.set, undo=True, state=tk.DISABLED,
+                                 borderwidth=1, relief="sunken", insertbackground="black", insertwidth=2,
+                                 takefocus=False)
         self.text_area.pack(fill=tk.BOTH, expand=True)
         scrollbar_text_y.config(command=self.text_area.yview)
         scrollbar_text_x.config(command=self.text_area.xview)
@@ -344,11 +317,9 @@ class TextAnnotator:
         entities_tree_frame.pack(fill=tk.BOTH, expand=True)
         scrollbar_entities_y = tk.Scrollbar(entities_tree_frame)
         scrollbar_entities_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.entities_tree = ttk.Treeview(
-            entities_tree_frame, columns=("ID", "Start", "End", "Text", "Tag"),
-            displaycolumns=("Start", "End", "Text", "Tag"), show="headings",
-            yscrollcommand=scrollbar_entities_y.set, selectmode='extended'
-        )
+        self.entities_tree = ttk.Treeview(entities_tree_frame, columns=("ID", "Start", "End", "Text", "Tag"),
+                                          displaycolumns=("Start", "End", "Text", "Tag"), show="headings",
+                                          yscrollcommand=scrollbar_entities_y.set, selectmode='extended')
         self.entities_tree.column("ID", width=0, stretch=False)
         self.entities_tree.heading("Start", text="Start", command=lambda: self._treeview_sort_column(self.entities_tree, "Start", False))
         self.entities_tree.heading("End", text="End", command=lambda: self._treeview_sort_column(self.entities_tree, "End", False))
@@ -369,11 +340,9 @@ class TextAnnotator:
         relations_tree_frame.pack(fill=tk.BOTH, expand=True)
         scrollbar_relations_y = tk.Scrollbar(relations_tree_frame)
         scrollbar_relations_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.relations_tree = ttk.Treeview(
-            relations_tree_frame, columns=("ID", "Head", "Type", "Tail"),
-            displaycolumns=("Head", "Type", "Tail"), show="headings",
-            yscrollcommand=scrollbar_relations_y.set, selectmode='browse'
-        )
+        self.relations_tree = ttk.Treeview(relations_tree_frame, columns=("ID", "Head", "Type", "Tail"),
+                                           displaycolumns=("Head", "Type", "Tail"), show="headings",
+                                           yscrollcommand=scrollbar_relations_y.set, selectmode='browse')
         self.relations_tree.column("ID", width=0, stretch=False)
         self.relations_tree.heading("Head", text="Head Entity", command=lambda: self._treeview_sort_column(self.relations_tree, "Head", False))
         self.relations_tree.heading("Type", text="Relation Type", command=lambda: self._treeview_sort_column(self.relations_tree, "Type", False))
@@ -392,14 +361,9 @@ class TextAnnotator:
         Optimized to use list comprehensions and pre-parse values for sorting.
         """
         items = tree.get_children("")
-
         if col in ["Start", "End"] and tree == self.entities_tree:
-            # Optimized: Use a list comprehension to pre-parse line.char tuples for sorting
-            data = [
-                (tuple(map(int, tree.set(item, col).split('.'))), item)
-                if tree.set(item, col) else ((0, 0), item)
-                for item in items
-            ]
+            data = [(tuple(map(int, tree.set(item, col).split('.'))), item)
+                    if tree.set(item, col) else ((0, 0), item) for item in items]
         else:
             data = [(tree.set(item, col).lower(), item) for item in items]
 
@@ -482,14 +446,14 @@ class TextAnnotator:
                 # Check a small window around the found index
                 for i in range(max(0, idx - 1), min(len(sorted_entities), idx + 1)):
                     entity = sorted_entities[i]
-                    start_pos = (entity['start_line'], entity['start_char'])
-                    end_pos = (entity['end_line'], entity['end_char'])
-                    if start_pos <= click_pos < end_pos:
+                    start_pos_tuple = (entity['start_line'], entity['start_char'])
+                    end_pos_tuple = (entity['end_line'], entity['end_char'])
+                    if start_pos_tuple <= click_pos < end_pos_tuple:
                         clicked_entity_dict = entity
                         break
 
                 if clicked_entity_dict:
-                    self._remove_entity_instance(clicked_entity_dict)
+                    self._remove_entity_instance(clicked_entity_dict) # <<< MODIFIED >>>
             except (tk.TclError, ValueError):
                 pass
             finally:
@@ -514,13 +478,12 @@ class TextAnnotator:
             sorted_entities = sorted(entities, key=lambda e: (e['start_line'], e['start_char']))
             start_positions = [(e['start_line'], e['start_char']) for e in sorted_entities]
             idx = bisect_left(start_positions, click_pos)
-
             for i in range(max(0, idx - 1), min(len(sorted_entities), idx + 1)):
                 entity = sorted_entities[i]
                 start_pos = (entity['start_line'], entity['start_char'])
                 end_pos = (entity['end_line'], entity['end_char'])
                 if start_pos <= click_pos < end_pos:
-                    return "break" # It's on an existing annotation, do nothing
+                    return "break"  # It's on an existing annotation, do nothing
 
             word_start = self.text_area.index(f"{click_index_str} wordstart")
             word_end = self.text_area.index(f"{click_index_str} wordend")
@@ -535,56 +498,17 @@ class TextAnnotator:
                 self.text_area.config(state=original_state)
         return "break"
 
+    # <<< MODIFIED/SIMPLIFIED >>>
     def _remove_entity_instance(self, entity_to_remove):
-        if not self.current_file_path or self.current_file_path not in self.annotations: return
-        file_data = self.annotations[self.current_file_path]
-        entities_list = file_data.get("entities", [])
-        relations_list = file_data.get("relations", [])
-
-        # Optimized: Use list comprehension for efficient removal
-        new_entities_list = [e for e in entities_list if e is not entity_to_remove]
-
-        if len(new_entities_list) == len(entities_list):
-            messagebox.showerror("Error", "Could not find the clicked entity instance to remove.", parent=self.root)
+        """
+        Finds a clicked entity and passes it to the central deletion handler.
+        """
+        if not self.current_file_path or self.current_file_path not in self.annotations:
             return
 
-        entity_id_being_removed = entity_to_remove.get('id')
-        entity_text = entity_to_remove.get('text', '')[:30]
-        entity_tag_being_removed = entity_to_remove.get('tag', 'N/A')
+        # Pass the single entity dictionary to the central handler
+        self._handle_entity_deletion([entity_to_remove])
 
-        confirm = messagebox.askyesno("Confirm Removal",
-                                     f"Remove annotation for '{entity_text}...' ({entity_tag_being_removed})?",
-                                     parent=self.root)
-        if not confirm:
-            self.status_var.set("Removal cancelled.")
-            return
-
-        self.text_area.tag_remove("selection_highlight", "1.0", tk.END)
-        self.annotations[self.current_file_path]["entities"] = new_entities_list
-
-        # Update lookup map
-        old_key = (entity_to_remove['id'], entity_to_remove['start_line'], entity_to_remove['start_char'],
-                   entity_to_remove['end_line'], entity_to_remove['end_char'], entity_to_remove['tag'])
-        self._entity_lookup_map.pop(old_key, None)
-
-        id_still_exists = any(e.get('id') == entity_id_being_removed for e in new_entities_list)
-        removed_relation_count = 0
-        if not id_still_exists and relations_list:
-            relations_original_count = len(relations_list)
-            relations_remaining = [rel for rel in relations_list if
-                                   rel.get('head_id') != entity_id_being_removed and
-                                   rel.get('tail_id') != entity_id_being_removed]
-            removed_relation_count = relations_original_count - len(relations_remaining)
-            file_data["relations"] = relations_remaining
-
-        self.update_entities_list()
-        self.update_relations_list()
-        self.apply_annotations_to_text()
-        self._update_button_states()
-        status_msg = f"Removed annotation for '{entity_text}...'"
-        if removed_relation_count > 0:
-            status_msg += f" and {removed_relation_count} associated relations."
-        self.status_var.set(status_msg)
 
     def get_color_for_tag(self, tag):
         if tag not in self.tag_colors:
@@ -691,8 +615,7 @@ class TextAnnotator:
         source_paths = filedialog.askopenfilenames(
             title="Select Text File(s) to Add",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            parent=self.root
-        )
+            parent=self.root)
         if not source_paths: return
         destination_dir = os.path.dirname(self.files_list[0])
         current_basenames = {os.path.basename(p) for p in self.files_list}
@@ -751,11 +674,11 @@ class TextAnnotator:
             self.line_start_offsets.append(len(file_content) + 1)
 
             file_data = self.annotations.setdefault(self.current_file_path, {"entities": [], "relations": []})
-            self._build_entity_lookup_map(file_data.get("entities", [])) # New: Build lookup map
+            self._build_entity_lookup_map(file_data.get("entities", [])) # Build lookup map
             self.update_entities_list()
             self.update_relations_list()
             self.apply_annotations_to_text()
-            self.status_var.set(f"Loaded: {filename} ({index+1}/{len(self.files_list)})")
+            self.status_var.set(f"Loaded: {filename} ({index + 1}/{len(self.files_list)})")
             self.text_area.edit_reset()
         except Exception as e:
             messagebox.showerror("Error Reading File", f"Failed to load file '{filename}':\n{str(e)}", parent=self.root)
@@ -772,8 +695,7 @@ class TextAnnotator:
             title="Save Tag/Relation Schema",
             defaultextension=".json",
             filetypes=[("ANNIE Schema Files", "*.json"), ("All files", "*.*")],
-            parent=self.root
-        )
+            parent=self.root)
         if not save_path:
             return
         schema_data = {
@@ -790,13 +712,12 @@ class TextAnnotator:
     def load_schema(self):
         """Loads entity tags and relation types from a JSON file, replacing the current ones."""
         if self.annotations and not messagebox.askyesno("Confirm Load",
-                                                        "Loading a new schema will replace your current tags. This may affect existing annotations if the tags don't match.\n\nContinue?"):
+                                                       "Loading a new schema will replace your current tags. This may affect existing annotations if the tags don't match.\n\nContinue?"):
             return
         load_path = filedialog.askopenfilename(
             title="Load Tag/Relation Schema",
             filetypes=[("ANNIE Schema Files", "*.json"), ("All files", "*.*")],
-            parent=self.root
-        )
+            parent=self.root)
         if not load_path:
             return
         try:
@@ -835,8 +756,8 @@ class TextAnnotator:
         except Exception: pass
         self.selected_entity_ids_for_relation = []
         self._entity_id_to_tree_iids = {}
-        self._entity_lookup_map.clear() # NEW: Clear the lookup map
-        self.line_start_offsets = [0] # NEW: Reset line offsets
+        self._entity_lookup_map.clear() # Clear the lookup map
+        self.line_start_offsets = [0] # Reset line offsets
 
     def _reset_state(self):
         self.clear_views()
@@ -853,10 +774,9 @@ class TextAnnotator:
         self.current_ai_models = []
 
     def _build_entity_lookup_map(self, entities):
-        """NEW: Builds the internal lookup map for entities."""
+        """Builds the internal lookup map for entities."""
         self._entity_lookup_map.clear()
         for entity in entities:
-            # Create a tuple key that uniquely identifies each entity instance
             key = (entity['id'], entity['start_line'], entity['start_char'],
                    entity['end_line'], entity['end_char'], entity['tag'])
             self._entity_lookup_map[key] = entity
@@ -881,8 +801,7 @@ class TextAnnotator:
         initial_dir = os.path.dirname(self.files_list[0]) if self.files_list else ""
         save_path = filedialog.asksaveasfilename(
             initialdir=initial_dir, initialfile="annotations.json", defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")], parent=self.root
-        )
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")], parent=self.root)
         if not save_path: return
         save_dir = os.path.dirname(save_path)
         serializable_annotations = {}
@@ -895,7 +814,7 @@ class TextAnnotator:
                 key = os.path.basename(file_path)
             serializable_annotations[key] = {
                 "entities": sorted(data.get("entities", []), key=lambda a: (a['start_line'], a['start_char'])),
-                "relations": sorted(data.get("relations", []), key=lambda r: (r.get('type', ''), r.get('head_id','')))
+                "relations": sorted(data.get("relations", []), key=lambda r: (r.get('type', ''), r.get('head_id', '')))
             }
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
@@ -914,8 +833,7 @@ class TextAnnotator:
             dir_name = os.path.basename(initial_dir)
             save_path = filedialog.asksaveasfilename(
                 initialdir=initial_dir, initialfile=f"{dir_name}_session.json", defaultextension=".json",
-                filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root
-            )
+                filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root)
         if not save_path:
             self.status_var.set("Save session cancelled.")
             return
@@ -953,8 +871,7 @@ class TextAnnotator:
                 return
 
         load_path = filedialog.askopenfilename(
-            filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root
-        )
+            filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root)
         if not load_path: return
         try:
             with open(load_path, 'r', encoding='utf-8') as f:
@@ -1055,13 +972,8 @@ class TextAnnotator:
         save_path = filedialog.asksaveasfilename(
             title="Export Annotations for Training",
             initialdir=os.path.dirname(self.files_list[0]) if self.files_list else "",
-            filetypes=[
-                ("CoNLL Files", "*.conll"),
-                ("spaCy JSONL Files", "*.jsonl"),
-                ("All files", "*.*")
-            ],
-            parent=self.root
-        )
+            filetypes=[("CoNLL Files", "*.conll"), ("spaCy JSONL Files", "*.jsonl"), ("All files", "*.*")],
+            parent=self.root)
         if not save_path:
             self.status_var.set("Export cancelled.")
             return
@@ -1169,8 +1081,7 @@ class TextAnnotator:
         import_path = filedialog.askopenfilename(
             title="Select Annotation File to Import",
             filetypes=[("All Supported Formats", "*.conll *.jsonl"), ("CoNLL Files", "*.conll"), ("JSONL Files", "*.jsonl")],
-            parent=self.root
-        )
+            parent=self.root)
         if not import_path: return
         try:
             parsed_docs, found_tags = [], set()
@@ -1203,7 +1114,7 @@ class TextAnnotator:
             base_name_for_docs = os.path.basename(os.path.splitext(import_path)[0])
             new_file_paths = []
             for i, doc in enumerate(parsed_docs):
-                save_path = os.path.join(save_dir, f"{base_name_for_docs}_{i+1}.txt")
+                save_path = os.path.join(save_dir, f"{base_name_for_docs}_{i + 1}.txt")
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(doc['text'])
                 self.files_list.append(save_path)
@@ -1223,7 +1134,7 @@ class TextAnnotator:
                     end_line, end_char = map(int, end_pos_str.split('.'))
                     text = doc['text'][ann['start']:ann['end']]
                     final_annotations.append({'id': uuid.uuid4().hex, 'start_line': start_line, 'start_char': start_char,
-                                             'end_line': end_line, 'end_char': end_char, 'text': text, 'tag': ann['tag']})
+                                              'end_line': end_line, 'end_char': end_char, 'text': text, 'tag': ann['tag']})
                 self.annotations[save_path] = {"entities": final_annotations, "relations": []}
             self.files_listbox.delete(0, tk.END)
             for path in self.files_list:
@@ -1370,7 +1281,7 @@ class TextAnnotator:
             annotation = {'id': entity_id, 'start_line': start_line, 'start_char': start_char,
                           'end_line': end_line, 'end_char': end_char, 'text': final_text, 'tag': tag}
             entities_in_file.append(annotation)
-            self._add_to_entity_lookup_map(annotation) # NEW: Add to lookup map
+            self._add_to_entity_lookup_map(annotation)
             self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
             self.apply_annotations_to_text()
             self.update_entities_list()
@@ -1386,81 +1297,223 @@ class TextAnnotator:
                 self.text_area.config(state=tk.DISABLED)
 
     def _add_to_entity_lookup_map(self, entity):
-        """NEW: Adds a single entity to the lookup map."""
+        """Adds a single entity to the lookup map."""
         key = (entity['id'], entity['start_line'], entity['start_char'],
                entity['end_line'], entity['end_char'], entity['tag'])
         self._entity_lookup_map[key] = entity
 
-    def remove_entity_annotation(self, event=None):
+    # <<< NEW FUNCTION >>>
+    def _ask_confirm_deletion_with_option(self, title, message, checkbox_text):
+        """Creates a custom dialog for confirmation with a checkbox option."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        result = {"confirmed": False, "option": False}
+
+        main_frame = tk.Frame(dialog, padx=20, pady=15)
+        main_frame.pack(fill="both", expand=True)
+        msg_label = tk.Label(main_frame, text=message, wraplength=350, justify=tk.LEFT)
+        msg_label.pack(pady=(0, 20))
+        option_var = tk.BooleanVar()
+        checkbox = tk.Checkbutton(main_frame, text=checkbox_text, variable=option_var)
+        checkbox.pack(anchor=tk.W, pady=(0, 15))
+        btn_frame = tk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X)
+
+        def on_ok():
+            result["confirmed"] = True
+            result["option"] = option_var.get()
+            dialog.destroy()
+
+        def on_cancel():
+            result["confirmed"] = False
+            dialog.destroy()
+
+        cancel_btn = tk.Button(btn_frame, text="Cancel", width=10, command=on_cancel)
+        cancel_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        ok_btn = tk.Button(btn_frame, text="Delete", width=10, command=on_ok)
+        ok_btn.pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_reqwidth()) / 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_reqheight()) / 2
+        dialog.geometry(f"+{int(x)}+{int(y)}")
+
+        cancel_btn.focus_set()
+        self.root.wait_window(dialog)
+        return result
+
+    def _remove_text_tag_from_corpus(self, text_to_delete, tag_to_delete):
+        """Removes all instances of a specific text-tag pair from the entire corpus, case-insensitively."""
+        if not messagebox.askokcancel("Permanent Deletion",
+                                      f"Are you sure you want to delete ALL occurrences of\n\n"
+                                      f"Text: '{text_to_delete}' (case-insensitive)\n" # MODIFIED TEXT
+                                      f"Tag: '{tag_to_delete}'\n\n"
+                                      f"from the entire corpus? This action cannot be undone.",
+                                      icon='warning', parent=self.root):
+            self.status_var.set("Corpus-wide deletion cancelled.")
+            return
+
+        self.status_var.set("Performing corpus-wide deletion...")
+        self.progress_bar.start()
+        self.root.update()
+
+        removed_count = 0
+        affected_files = set()
+
+        # Normalize the search text to lowercase
+        # <<< MODIFIED >>>
+        normalized_text_to_delete = text_to_delete.strip().lower()
+
+        for file_path, data in self.annotations.items():
+            entities = data.get("entities", [])
+            if not entities:
+                continue
+
+            initial_entity_count = len(entities)
+            ids_to_check_for_relation_removal = set()
+
+            entities_to_keep = []
+            for entity in entities:
+                # Compare both the entity text and the search text in lowercase
+                # <<< MODIFIED >>>
+                if entity.get('text', '').strip().lower() == normalized_text_to_delete and entity.get('tag') == tag_to_delete:
+                    ids_to_check_for_relation_removal.add(entity['id'])
+                    removed_count += 1
+                else:
+                    entities_to_keep.append(entity)
+
+            if len(entities_to_keep) < initial_entity_count:
+                affected_files.add(file_path)
+                data["entities"] = entities_to_keep
+
+                remaining_ids = {e['id'] for e in entities_to_keep}
+                orphaned_ids = ids_to_check_for_relation_removal - remaining_ids
+
+                if orphaned_ids and "relations" in data:
+                    relations = data.get("relations", [])
+                    data["relations"] = [r for r in relations if r['head_id'] not in orphaned_ids and r['tail_id'] not in orphaned_ids]
+
+        self.progress_bar.stop()
+
+        if self.current_file_path in affected_files:
+            self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
+            self.apply_annotations_to_text()
+            self.update_entities_list()
+            self.update_relations_list()
+
+        self.status_var.set(f"Deleted {removed_count} annotations from {len(affected_files)} files.")
+
+    def _handle_entity_deletion(self, entities_to_delete):
+        """
+        Central handler for all entity deletion requests. Shows custom dialog and branches logic.
+        """
+        if not entities_to_delete:
+            return
+
         if self._is_deleting:
             return
         self._is_deleting = True
+
         try:
-            selected_iids = self.entities_tree.selection()
-            if not selected_iids:
-                messagebox.showinfo("Info", "Select one or more entities to remove.", parent=self.root)
-                return
-            all_iids_before = self.entities_tree.get_children()
-            next_selection_index = 0
-            if all_iids_before:
-                try:
-                    next_selection_index = all_iids_before.index(selected_iids[0])
-                except ValueError:
-                    pass
-            if not messagebox.askyesno("Confirm Removal", f"Remove {len(selected_iids)} selected entity instance(s)?"):
-                return
-            entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
-            ids_to_remove, data_to_remove = set(), []
+            # Get a representative entity for the dialog text
+            first_entity = entities_to_delete[0]
+            rep_text = first_entity.get('text', '')
+            rep_tag = first_entity.get('tag', '')
 
-            # Optimized: Use the lookup map to find the entity dictionaries
-            for iid in selected_iids:
-                try:
-                    parts = iid.split('|')
-                    if len(parts) < 6: continue
-                    entity_key = (parts[1], int(parts[2].split('.')[0]), int(parts[2].split('.')[1]),
-                                  int(parts[3].split('.')[0]), int(parts[3].split('.')[1]), parts[4])
-                    entity_dict = self._entity_lookup_map.get(entity_key)
-                    if entity_dict:
-                        data_to_remove.append(entity_dict)
-                        ids_to_remove.add(entity_dict['id'])
-                except (ValueError, IndexError):
-                    continue
+            # Call the custom dialog
+            confirm_result = self._ask_confirm_deletion_with_option(
+                title="Confirm Deletion",
+                message=f"Are you sure you want to delete the selected {len(entities_to_delete)} annotation(s)?",
+                checkbox_text=f"Delete all \"{rep_text[:20]}...\" ({rep_tag}) from the entire corpus"
+            )
 
-            if not data_to_remove:
-                messagebox.showerror("Error", "Could not retrieve data for selected entities.", parent=self.root)
+            if not confirm_result["confirmed"]:
+                self.status_var.set("Deletion cancelled.")
                 return
 
-            # Perform the removal and update the lookup map
-            for item in data_to_remove:
-                if item in entities_in_file:
-                    entities_in_file.remove(item)
+            # Branch the logic based on the checkbox
+            if confirm_result["option"]:
+                self._remove_text_tag_from_corpus(rep_text, rep_tag)
+            else:
+                # --- This is the original logic for deleting selected items only ---
+                all_iids_before = self.entities_tree.get_children()
+                next_selection_index = 0
+                if all_iids_before:
+                    try:
+                        # We need to find the iid of the first item to delete to keep focus
+                        first_id, first_sl, first_sc, first_el, first_ec, first_tag = (
+                            first_entity['id'], first_entity['start_line'], first_entity['start_char'],
+                            first_entity['end_line'], first_entity['end_char'], first_entity['tag']
+                        )
+                        for i, iid in enumerate(all_iids_before):
+                            parts = iid.split('|')
+                            if (parts[1] == first_id and
+                                int(parts[2].split('.')[0]) == first_sl and int(parts[2].split('.')[1]) == first_sc and
+                                int(parts[3].split('.')[0]) == first_el and int(parts[3].split('.')[1]) == first_ec and
+                                parts[4] == first_tag):
+                                next_selection_index = i
+                                break
+                    except (ValueError, IndexError):
+                        pass
 
-            # Remove from lookup map
-            for iid in selected_iids:
-                try:
-                    parts = iid.split('|')
-                    if len(parts) < 6: continue
-                    entity_key = (parts[1], int(parts[2].split('.')[0]), int(parts[2].split('.')[1]),
-                                  int(parts[3].split('.')[0]), int(parts[3].split('.')[1]), parts[4])
-                    self._entity_lookup_map.pop(entity_key, None)
-                except (ValueError, IndexError):
-                    continue
+                entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
+                ids_to_remove = {e['id'] for e in entities_to_delete}
 
-            relations = self.annotations[self.current_file_path].get("relations", [])
-            if relations:
-                remaining_ids = {e['id'] for e in entities_in_file}
-                orphaned_ids = ids_to_remove - remaining_ids
-                if orphaned_ids:
-                    self.annotations[self.current_file_path]["relations"] = [
-                        r for r in relations if r['head_id'] not in orphaned_ids and r['tail_id'] not in orphaned_ids
-                    ]
+                # Remove from data structures
+                for item in entities_to_delete:
+                    if item in entities_in_file:
+                        entities_in_file.remove(item)
+                    key = (item['id'], item['start_line'], item['start_char'],
+                           item['end_line'], item['end_char'], item['tag'])
+                    self._entity_lookup_map.pop(key, None)
 
-            self.apply_annotations_to_text()
-            self.update_relations_list()
-            self.update_entities_list(selection_hint=next_selection_index)
-            self.status_var.set(f"Removed {len(data_to_remove)} entity instances.")
+                # Clean up orphaned relations
+                relations = self.annotations[self.current_file_path].get("relations", [])
+                if relations:
+                    remaining_ids = {e['id'] for e in entities_in_file}
+                    orphaned_ids = ids_to_remove - remaining_ids
+                    if orphaned_ids:
+                        self.annotations[self.current_file_path]["relations"] = [
+                            r for r in relations if r['head_id'] not in orphaned_ids and r['tail_id'] not in orphaned_ids
+                        ]
+
+                # Update UI
+                self.apply_annotations_to_text()
+                self.update_relations_list()
+                self.update_entities_list(selection_hint=next_selection_index)
+                self.status_var.set(f"Removed {len(entities_to_delete)} entity instance(s).")
+
         finally:
             self._is_deleting = False
+
+    def remove_entity_annotation(self, event=None):
+        """
+        Gets selected entities from the treeview and passes them to the central deletion handler.
+        """
+        selected_iids = self.entities_tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("Info", "Select one or more entities to remove.", parent=self.root)
+            return
+
+        entities_to_delete = []
+        for iid in selected_iids:
+            try:
+                parts = iid.split('|')
+                if len(parts) < 6: continue
+                entity_key = (parts[1], int(parts[2].split('.')[0]), int(parts[2].split('.')[1]),
+                              int(parts[3].split('.')[0]), int(parts[3].split('.')[1]), parts[4])
+                entity_dict = self._entity_lookup_map.get(entity_key)
+                if entity_dict:
+                    entities_to_delete.append(entity_dict)
+            except (ValueError, IndexError):
+                continue
+
+        self._handle_entity_deletion(entities_to_delete)
 
     def merge_selected_entities(self):
         selected_tree_iids = self.entities_tree.selection()
@@ -1468,7 +1521,6 @@ class TextAnnotator:
             messagebox.showinfo("Info", "Select 2+ entity instances to merge.", parent=self.root)
             return
 
-        entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
         selected_entities_data = []
         for tree_iid in selected_tree_iids:
             try:
@@ -1498,14 +1550,10 @@ class TextAnnotator:
         # Update IDs and the lookup map
         for entity in selected_entities_data:
             if entity['id'] in ids_to_change:
-                # Remove old entry
                 old_key = (entity['id'], entity['start_line'], entity['start_char'],
                            entity['end_line'], entity['end_char'], entity['tag'])
                 self._entity_lookup_map.pop(old_key, None)
-
                 entity['id'] = canonical_id
-
-                # Add new entry with canonical ID
                 new_key = (entity['id'], entity['start_line'], entity['start_char'],
                            entity['end_line'], entity['end_char'], entity['tag'])
                 self._entity_lookup_map[new_key] = entity
@@ -1530,7 +1578,6 @@ class TextAnnotator:
             click_pos = tuple(map(int, click_index_str.split('.')))
         except (tk.TclError, ValueError): return
 
-        # Optimized: Find the clicked entity using a more direct approach
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         clicked_entity = None
         for entity in reversed(entities):
@@ -1554,15 +1601,11 @@ class TextAnnotator:
         context_menu.tk_popup(event.x_root, event.y_root)
 
     def demerge_entity(self, entity_to_demerge):
-        # Remove old key from map
         old_key = (entity_to_demerge['id'], entity_to_demerge['start_line'], entity_to_demerge['start_char'],
                    entity_to_demerge['end_line'], entity_to_demerge['end_char'], entity_to_demerge['tag'])
         self._entity_lookup_map.pop(old_key, None)
-
-        # Assign new ID and add new key
         entity_to_demerge['id'] = uuid.uuid4().hex
         self._add_to_entity_lookup_map(entity_to_demerge)
-
         self.update_entities_list()
         self.apply_annotations_to_text()
         self.status_var.set(f"Demerged instance. New ID: {entity_to_demerge['id'][:8]}...")
@@ -1575,7 +1618,6 @@ class TextAnnotator:
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL)
         try:
-            # Optimized: Combine tag clearing into one loop
             tags_to_clear = set(self.entity_tags) | {"propagated_entity"}
             for tag in tags_to_clear:
                 self.text_area.tag_remove(tag, "1.0", tk.END)
@@ -1786,12 +1828,10 @@ class TextAnnotator:
         allow_overlap = self.allow_multilabel_overlap.get()
         lower_case_text_to_tag_map = {text.lower(): tag for text, tag in text_to_tag_map.items()}
         sorted_texts = sorted(text_to_tag_map.keys(), key=len, reverse=True)
-        # Optimized: Combine all patterns into a single regex with alternation
         pattern = '|'.join(r'\b' + re.escape(text) + r'\b' for text in sorted_texts)
         regex = re.compile(pattern, re.IGNORECASE)
         self.status_var.set(f"Starting {source_description}..."); self.root.update()
         file_contents = {}
-        # Optimized: Read all files into memory once
         for file_path in self.files_list:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -1802,7 +1842,6 @@ class TextAnnotator:
             target_entities = self.annotations.setdefault(file_path, {"entities": [], "relations": []})['entities']
             existing_spans_and_tags = {(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag']) for ann in target_entities}
 
-            # Temporary offsets for this file
             line_starts = [0]
             for i, char in enumerate(content):
                 if char == '\n':
@@ -1816,10 +1855,8 @@ class TextAnnotator:
                     continue
                 start_index, end_index = match.span()
 
-                # Use the fast, pre-calculated offset conversion
                 start_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, start_index)
                 end_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, end_index)
-
                 start_l, start_c = map(int, start_pos.split('.'))
                 end_l, end_c = map(int, end_pos.split('.'))
                 current_span_and_tag = (start_l, start_c, end_l, end_c, tag)
@@ -1839,7 +1876,6 @@ class TextAnnotator:
                 affected_files.add(file_path)
 
         if self.current_file_path in affected_files:
-            # Rebuild the lookup map and UI for the currently viewed file
             self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {})['entities'])
             self.update_entities_list()
             self.apply_annotations_to_text()
@@ -1866,7 +1902,6 @@ class TextAnnotator:
             display_text = item
             if item_type_name == "Entity Tags" and index < 10:
                 hotkey_num = (index + 1) % 10 if (index + 1) % 10 != 0 else 0
-                if hotkey_num == 0: hotkey_num = 0
                 display_text = f"{hotkey_num}: {item}"
             listbox.insert(tk.END, display_text)
             if item_type_name == "Entity Tags":
@@ -1943,12 +1978,9 @@ class TextAnnotator:
             return
 
         if not self.current_ai_models:
-            # If no models are configured, show the settings dialog.
-            # The dialog's own "Annotate" button will then call _start_ai_annotation_process.
             self._show_ai_settings_dialog()
             return
 
-        # If models are already configured, start the process directly.
         self._start_ai_annotation_process(self.current_ai_models)
 
     def pre_annotate_with_ai(self):
@@ -2078,28 +2110,18 @@ class TextAnnotator:
                 try:
                     pipelines = []
                     for i, model_name in enumerate(model_names):
-                        self._update_status_threadsafe(f"Loading AI model '{model_name}' ({i+1}/{len(model_names)})...")
+                        self._update_status_threadsafe(f"Loading AI model '{model_name}' ({i + 1}/{len(model_names)})...")
                         tokenizer = AutoTokenizer.from_pretrained(model_name)
                         try:
                             if torch.cuda.is_available():
-                                ner_pipeline = pipeline(
-                                    "token-classification",
-                                    model=model_name,
-                                    tokenizer=tokenizer,
-                                    aggregation_strategy="max",
-                                    device="cuda"
-                                )
+                                ner_pipeline = pipeline("token-classification", model=model_name, tokenizer=tokenizer,
+                                                        aggregation_strategy="max", device="cuda")
                             else:
                                 raise RuntimeError("CUDA not available, back to CPU")
                         except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
                             self._update_status_threadsafe(f"CUDA unavailable ({str(e)}), switching to CPU for model '{model_name}'...")
-                            ner_pipeline = pipeline(
-                                "token-classification",
-                                model=model_name,
-                                tokenizer=tokenizer,
-                                aggregation_strategy="max",
-                                device="cpu"
-                            )
+                            ner_pipeline = pipeline("token-classification", model=model_name, tokenizer=tokenizer,
+                                                    aggregation_strategy="max", device="cpu")
                         pipelines.append(ner_pipeline)
 
                     self._update_status_threadsafe("AI models loaded. Starting annotation...")
@@ -2121,8 +2143,7 @@ class TextAnnotator:
             messagebox.showerror(
                 "Missing Libraries",
                 "The 'transformers' and 'torch' libraries are required.\nPlease install: pip install transformers torch",
-                parent=self.root
-            )
+                parent=self.root)
         except Exception as e:
             self._is_annotating_ai = False
             self.settings_menu.entryconfig("Pre-annotate with AI...", state="normal")
@@ -2130,15 +2151,13 @@ class TextAnnotator:
             messagebox.showerror(
                 "Setup Error",
                 f"An unexpected error occurred during AI setup.\n\nError: {e}",
-                parent=self.root
-            )
+                parent=self.root)
             traceback.print_exc()
 
     def _run_ai_model(self, full_text, pipelines):
         """
         Applies NER models to long text and merges the results.
-        Correctly handles word-snapping for annotations, and handles long documents.
-        This method is now called from a background thread.
+        This method is called from a background thread.
         """
         try:
             label_map = {
@@ -2163,7 +2182,6 @@ class TextAnnotator:
                     offset += 1
                 return offset
 
-            # Use the optimized _char_offset_to_tkinter_index method
             line_starts = [0]
             for i, char in enumerate(full_text):
                 if char == '\n':
@@ -2183,32 +2201,24 @@ class TextAnnotator:
                     for entity in chunk_results:
                         tag = label_map.get(entity.get("entity_group"))
                         if not tag or tag not in self.entity_tags: continue
-
                         start_offset_raw, end_offset_raw = entity['start'], entity['end']
                         entity_text_raw = full_text[start_offset_raw:end_offset_raw]
-
                         lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
                         rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
                         start_offset_clean = start_offset_raw + lstrip_len
                         end_offset_clean = end_offset_raw - rstrip_len
-
                         if self.extend_to_word.get():
                             start_offset_clean = find_start_of_word(full_text, start_offset_clean)
                             end_offset_clean = find_end_of_word(full_text, end_offset_clean)
-
                         final_word = full_text[start_offset_clean:end_offset_clean]
                         if not final_word.strip(): continue
-
                         start_pos = offset_to_tkinter(start_offset_clean)
                         end_pos = offset_to_tkinter(end_offset_clean)
                         start_line, start_char = map(int, start_pos.split("."))
                         end_line, end_char = map(int, end_pos.split("."))
-
-                        new_ann = {
-                            "id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
-                            "end_line": end_line, "end_char": end_char, "text": final_word,
-                            "tag": tag, "propagated": True
-                        }
+                        new_ann = {"id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
+                                   "end_line": end_line, "end_char": end_char, "text": final_word,
+                                   "tag": tag, "propagated": True}
                         all_detected_entities.append(new_ann)
             else:
                 encoding = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False, truncation=False)
@@ -2223,46 +2233,35 @@ class TextAnnotator:
                         start_token_idx = j
                         end_token_idx = min(j + max_length, num_tokens)
                         if start_token_idx >= end_token_idx: continue
-
                         chunk_start_char = offsets[start_token_idx][0]
                         chunk_end_char = offsets[end_token_idx - 1][1]
                         chunk_text = full_text[chunk_start_char:chunk_end_char]
                         if not chunk_text.strip(): continue
-
                         chunk_results = ner_pipeline(chunk_text)
                         for entity in chunk_results:
                             tag = label_map.get(entity.get("entity_group"))
                             if not tag or tag not in self.entity_tags: continue
-
                             start_offset_raw = chunk_start_char + entity['start']
                             end_offset_raw = chunk_start_char + entity['end']
                             entity_text_raw = full_text[start_offset_raw:end_offset_raw]
-
                             lstrip_len = len(entity_text_raw) - len(entity_text_raw.lstrip())
                             rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
                             start_offset_clean = start_offset_raw + lstrip_len
                             end_offset_clean = end_offset_raw - rstrip_len
-
                             if self.extend_to_word.get():
                                 start_offset_clean = find_start_of_word(full_text, start_offset_clean)
                                 end_offset_clean = find_end_of_word(full_text, end_offset_clean)
-
                             final_word = full_text[start_offset_clean:end_offset_clean]
                             if not final_word.strip(): continue
-
                             start_pos = offset_to_tkinter(start_offset_clean)
                             end_pos = offset_to_tkinter(end_offset_clean)
                             start_line, start_char = map(int, start_pos.split("."))
                             end_line, end_char = map(int, end_pos.split("."))
-
-                            new_ann = {
-                                "id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
-                                "end_line": end_line, "end_char": end_char, "text": final_word,
-                                "tag": tag, "propagated": True
-                            }
+                            new_ann = {"id": uuid.uuid4().hex, "start_line": start_line, "start_char": start_char,
+                                       "end_line": end_line, "end_char": end_char, "text": final_word,
+                                       "tag": tag, "propagated": True}
                             all_detected_entities.append(new_ann)
 
-            # Optimized: Use a dictionary for O(1) deduplication
             unique_annotations = {(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag']): ann for ann in all_detected_entities}
             new_annotations = list(unique_annotations.values())
             self.root.after(0, self._update_ui_with_ai_annotations, new_annotations)
@@ -2288,14 +2287,9 @@ class TextAnnotator:
             entities_list = self.annotations.setdefault(self.current_file_path, {}).setdefault("entities", [])
             added_count = 0
             for ann in new_annotations:
-                is_duplicate = any(
-                    e['start_line'] == ann['start_line'] and
-                    e['start_char'] == ann['start_char'] and
-                    e['end_line'] == ann['end_line'] and
-                    e['end_char'] == ann['end_char'] and
-                    e['tag'] == ann['tag']
-                    for e in entities_list
-                )
+                is_duplicate = any(e['start_line'] == ann['start_line'] and e['start_char'] == ann['start_char'] and
+                                   e['end_line'] == ann['end_line'] and e['end_char'] == ann['end_char'] and
+                                   e['tag'] == ann['tag'] for e in entities_list)
                 if not is_duplicate and (self.allow_multilabel_overlap.get() or not self._is_overlapping_in_list(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], entities_list)):
                     entities_list.append(ann)
                     self._add_to_entity_lookup_map(ann) # Update lookup map
