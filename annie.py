@@ -1002,13 +1002,27 @@ class TextAnnotator:
                 except Exception:
                     print(f"Warning: Could not read file {file_path} for export. Skipping.")
                     continue
-                entities = []
-                for ann in data['entities']:
+
+                spans = []
+                # Sort entities by position to ensure clean processing
+                sorted_entities = sorted(data['entities'], key=lambda x: (x['start_line'], x['start_char']))
+
+                for ann in sorted_entities:
+                    # Convert tkinter's 'line.char' index to an absolute character offset
                     start_char = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
                     end_char = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
-                    entities.append([start_char, end_char, ann['tag']])
-                spacy_doc = {"text": content, "entities": entities}
+
+                    # Append a dictionary with the correct keys: "start", "end", "label"
+                    spans.append({
+                        "start": start_char,
+                        "end": end_char,
+                        "label": ann['tag']
+                    })
+
+                # Create the final JSON object with the "spans" key
+                spacy_doc = {"text": content, "spans": spans}
                 f.write(json.dumps(spacy_doc, ensure_ascii=False) + '\n')
+
 
     def _export_as_conll(self, save_path):
         """Exports all documents to a single CoNLL-2003 formatted file."""
