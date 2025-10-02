@@ -245,6 +245,10 @@ class TextAnnotator:
         self.files_listbox = tk.Listbox(files_frame, yscrollcommand=scrollbar_files.set, exportselection=False)
         self.files_listbox.pack(fill=tk.BOTH, expand=True)
         self.files_listbox.bind('<<ListboxSelect>>', self.on_file_select)
+
+        self.files_listbox.bind('<Button-3>', self._on_files_right_click) # For Windows/Linux right-click
+        self.files_listbox.bind('<Button-2>', self._on_files_right_click) # For macOS right-click
+
         scrollbar_files.config(command=self.files_listbox.yview)
         nav_frame = tk.Frame(left_frame)
         nav_frame.pack(fill=tk.X, pady=5)
@@ -794,6 +798,75 @@ class TextAnnotator:
         if selected_indices and selected_indices[0] != self.current_file_index:
             self.load_file(selected_indices[0])
 
+    def _on_files_right_click(self, event):
+        """Handles right-click on the files listbox to show a context menu."""
+        try:
+            # Identify which item was clicked
+            clicked_index = self.files_listbox.nearest(event.y)
+
+            # Select the clicked item to provide visual feedback
+            self.files_listbox.selection_clear(0, tk.END)
+            self.files_listbox.selection_set(clicked_index)
+            self.files_listbox.activate(clicked_index)
+
+            # Create and display the context menu
+            context_menu = tk.Menu(self.root, tearoff=0)
+            context_menu.add_command(label="Remove from Session", command=self.remove_selected_file_from_session)
+            context_menu.tk_popup(event.x_root, event.y_root)
+
+        except tk.TclError:
+            # This can happen if the listbox is empty and is right-clicked
+            pass
+
+    def remove_selected_file_from_session(self):
+        """Removes the selected file from the session after confirmation."""
+        selected_indices = self.files_listbox.curselection()
+        if not selected_indices:
+            return
+
+        index_to_delete = selected_indices[0]
+        file_path_to_delete = self.files_list[index_to_delete]
+        filename = os.path.basename(file_path_to_delete)
+
+        # Ask for confirmation before removing
+        if not messagebox.askyesno("Confirm Removal",
+                                   f"Are you sure you want to remove '{filename}' from this session?\n\n"
+                                   f"This will remove the file and its annotations from the session but will NOT delete the actual file from your disk.",
+                                   parent=self.root):
+            return
+
+        # --- Proceed with removal ---
+
+        # Remove from data structures
+        self.files_list.pop(index_to_delete)
+        self.annotations.pop(file_path_to_delete, None) # Safely remove annotations
+
+        # Remove from the UI listbox
+        self.files_listbox.delete(index_to_delete)
+
+        # Check if the currently displayed file was the one deleted
+        if self.current_file_index == index_to_delete:
+            self.clear_views()
+            self.current_file_path = None
+            self.current_file_index = -1
+
+            # If there are still files left, load the next available one
+            if self.files_list:
+                new_index_to_load = min(index_to_delete, len(self.files_list) - 1)
+                self.load_file(new_index_to_load)
+            else:
+                # If no files are left, reset to the initial state
+                self.status_var.set("All files removed from session. Ready.")
+                self.text_area.config(state=tk.DISABLED)
+
+        # If a file *before* the current one was deleted, we need to decrement the current index
+        elif self.current_file_index > index_to_delete:
+            self.current_file_index -= 1
+
+        # Update the UI state
+        self.status_var.set(f"Removed '{filename}' from the session.")
+        self._update_button_states()
+
     def save_annotations(self):
         if not self.annotations or all(not data.get('entities') and not data.get('relations') for data in self.annotations.values()):
             messagebox.showinfo("Info", "There are no annotations to save.", parent=self.root)
@@ -995,6 +1068,7 @@ class TextAnnotator:
         """Exports all documents to a single spaCy v3 JSONL file."""
         with open(save_path, 'w', encoding='utf-8') as f:
             for file_path, data in self.annotations.items():
+                # Skip files that have no entity annotations
                 if not data.get("entities"): continue
                 try:
                     with open(file_path, 'r', encoding='utf-8') as text_file:
@@ -1003,7 +1077,9 @@ class TextAnnotator:
                     print(f"Warning: Could not read file {file_path} for export. Skipping.")
                     continue
 
+                # 1. Initialize a list named 'spans' instead of 'entities'
                 spans = []
+
                 # Sort entities by position to ensure clean processing
                 sorted_entities = sorted(data['entities'], key=lambda x: (x['start_line'], x['start_char']))
 
@@ -1012,17 +1088,17 @@ class TextAnnotator:
                     start_char = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
                     end_char = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
 
-                    # Append a dictionary with the correct keys: "start", "end", "label"
+                    # 2. Append a dictionary with the correct keys: "start", "end", "label"
                     spans.append({
                         "start": start_char,
                         "end": end_char,
                         "label": ann['tag']
                     })
 
-                # Create the final JSON object with the "spans" key
+                # 3. Create the final JSON object with the "spans" key
                 spacy_doc = {"text": content, "spans": spans}
-                f.write(json.dumps(spacy_doc, ensure_ascii=False) + '\n')
 
+                f.write(json.dumps(spacy_doc, ensure_ascii=False) + '\n')
 
     def _export_as_conll(self, save_path):
         """Exports all documents to a single CoNLL-2003 formatted file."""
@@ -2138,7 +2214,7 @@ class TextAnnotator:
                         except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
                             self._update_status_threadsafe(f"CUDA unavailable ({str(e)}), switching to CPU for model '{model_name}'...")
                             ner_pipeline = pipeline("token-classification", model=model_name, tokenizer=tokenizer,
-                                                    aggregation_strategy="max", device="cpu")
+                                                   aggregation_strategy="max", device="cpu")
                         pipelines.append(ner_pipeline)
 
                     self._update_status_threadsafe("AI models loaded. Starting annotation...")
