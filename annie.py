@@ -1392,7 +1392,6 @@ class TextAnnotator:
                entity['end_line'], entity['end_char'], entity['tag'])
         self._entity_lookup_map[key] = entity
 
-    # <<< NEW FUNCTION >>>
     def _ask_confirm_deletion_with_option(self, title, message, checkbox_text):
         """Creates a custom dialog for confirmation with a checkbox option."""
         dialog = tk.Toplevel(self.root)
@@ -1424,16 +1423,23 @@ class TextAnnotator:
 
         cancel_btn = tk.Button(btn_frame, text="Cancel", width=10, command=on_cancel)
         cancel_btn.pack(side=tk.RIGHT, padx=(10, 0))
-        ok_btn = tk.Button(btn_frame, text="Delete", width=10, command=on_ok)
+
+        ok_btn = tk.Button(btn_frame, text="Delete", width=10, command=on_ok, default=tk.ACTIVE)
         ok_btn.pack(side=tk.RIGHT)
+
         dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        dialog.bind('<Return>', lambda event: ok_btn.invoke())
+        dialog.bind('<Escape>', lambda event: cancel_btn.invoke())
 
         self.root.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_reqwidth()) / 2
         y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_reqheight()) / 2
         dialog.geometry(f"+{int(x)}+{int(y)}")
 
-        cancel_btn.focus_set()
+        # Set the initial focus on the 'Delete' button instead of 'Cancel'
+        ok_btn.focus_set()
+
         self.root.wait_window(dialog)
         return result
 
