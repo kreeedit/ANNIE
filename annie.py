@@ -71,6 +71,7 @@ class TextAnnotator:
         # --- Relation Tagging Configuration ---
         self.relation_types = ["spouse_of", "works_at", "located_in", "born_on", "produces"]
         self.selected_relation_type = tk.StringVar(value=self.relation_types[0] if self.relation_types else "")
+        self.selection_mode = tk.StringVar(value="word")
 
         # --- UI State ---
         self.selected_entity_ids_for_relation = []
@@ -229,6 +230,12 @@ class TextAnnotator:
         self.settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
         self.settings_menu.add_command(label="Pre-annotate with AI...", command=self.pre_annotate_with_ai)
         self.settings_menu.add_separator()
+        mode_menu = tk.Menu(self.settings_menu, tearoff=0)
+        self.settings_menu.add_cascade(label="Selection Mode (Session Type)", menu=mode_menu)
+        mode_menu.add_radiobutton(label="Word-based (Snap to whole words)",
+                                  variable=self.selection_mode, value="word")
+        mode_menu.add_radiobutton(label="Character-based (Exact selection)",
+                                  variable=self.selection_mode, value="char")
         self.settings_menu.add_checkbutton(label="Allow Multi-label & Overlapping Annotations",
                                            variable=self.allow_multilabel_overlap,
                                            onvalue=True, offvalue=False)
@@ -920,6 +927,7 @@ class TextAnnotator:
             "current_file_index": self.current_file_index,
             "entity_tags": self.entity_tags,
             "tag_propagation_states": self.tag_propagation_states,
+            "selection_mode": self.selection_mode.get(),
             "relation_types": self.relation_types,
             "tag_colors": self.tag_colors,
             "annotations": self.annotations,
@@ -976,6 +984,7 @@ class TextAnnotator:
             self.entity_tags = session_data["entity_tags"]
             loaded_states = session_data.get("tag_propagation_states", {})
             self.tag_propagation_states = {tag: loaded_states.get(tag, True) for tag in self.entity_tags}
+            self.selection_mode.set(session_data.get("selection_mode", "word"))
             self.relation_types = session_data["relation_types"]
             self.tag_colors = session_data.get("tag_colors", {})
             self.extend_to_word.set(session_data.get("extend_to_word", False))
@@ -1346,44 +1355,80 @@ class TextAnnotator:
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL)
         try:
-            start_pos = self.text_area.index(tk.SEL_FIRST)
-            end_pos = self.text_area.index(tk.SEL_LAST)
+            # 1. Retrieve original selection
+            try:
+                start_pos = self.text_area.index(tk.SEL_FIRST)
+                end_pos = self.text_area.index(tk.SEL_LAST)
+            except tk.TclError:
+                return
+
             if start_pos == end_pos: return
-            snapped_start_pos = self.text_area.index(f"{start_pos} wordstart")
-            snapped_end_pos = self.text_area.index(f"{self.text_area.index(f'{end_pos}-1c')} wordend")
-            if self.text_area.compare(snapped_start_pos, ">=", snapped_end_pos): return
-            snapped_text = self.text_area.get(snapped_start_pos, snapped_end_pos)
-            leading_spaces = len(snapped_text) - len(snapped_text.lstrip())
-            trailing_spaces = len(snapped_text) - len(snapped_text.rstrip())
-            final_text = snapped_text.strip()
+
+            # 2. Checking Mode: Word vs Character
+            if self.selection_mode.get() == "word":
+                # Word mode: extension to word boundaries (original behavior)
+                calc_start_pos = self.text_area.index(f"{start_pos} wordstart")
+                calc_end_pos = self.text_area.index(f"{self.text_area.index(f'{end_pos}-1c')} wordend")
+            else:
+                # Character mode: using precise selection
+                calc_start_pos = start_pos
+                calc_end_pos = end_pos
+
+            # 3. Validation and Whitespace Handling
+            # Check that the cursor is not pointing in the opposite direction (rare error).
+            if self.text_area.compare(calc_start_pos, ">=", calc_end_pos): return
+
+            # Extracting text from (possibly extended) positions
+            raw_text = self.text_area.get(calc_start_pos, calc_end_pos)
+
+            # Trimming extraneous whitespace to keep the annotation clean
+            # This is important for both modes (e.g., if the user accidentally selects a space)
+            leading_spaces = len(raw_text) - len(raw_text.lstrip())
+            trailing_spaces = len(raw_text) - len(raw_text.rstrip())
+            final_text = raw_text.strip()
+
             if not final_text: return
-            final_start_pos = self.text_area.index(f"{snapped_start_pos}+{leading_spaces}c")
-            final_end_pos = self.text_area.index(f"{snapped_end_pos}-{trailing_spaces}c")
+
+            # Calculating final positions after trimming
+            final_start_pos = self.text_area.index(f"{calc_start_pos}+{leading_spaces}c")
+            final_end_pos = self.text_area.index(f"{calc_end_pos}-{trailing_spaces}c")
+
+
             start_line, start_char = map(int, final_start_pos.split('.'))
             end_line, end_char = map(int, final_end_pos.split('.'))
+
             tag = self.selected_entity_tag.get()
             if not tag: return
+
+            # Check overlap
             entities_in_file = self.annotations.get(self.current_file_path, {}).get("entities", [])
             if not self.allow_multilabel_overlap.get():
                 if self._is_overlapping_in_list(start_line, start_char, end_line, end_char, entities_in_file):
                     messagebox.showwarning("Overlap Detected", "Annotation overlaps with an existing one. Enable multi-label in Settings to allow this.", parent=self.root)
                     return
             else:
+                # Duplicate check
                 for ann in entities_in_file:
                     if (ann['start_line'] == start_line and ann['start_char'] == start_char and
                         ann['end_line'] == end_line and ann['end_char'] == end_char and ann['tag'] == tag):
                         self.status_var.set("This exact annotation already exists.")
                         return
+
+            # Save and UI update
             entity_id = uuid.uuid4().hex
             annotation = {'id': entity_id, 'start_line': start_line, 'start_char': start_char,
                           'end_line': end_line, 'end_char': end_char, 'text': final_text, 'tag': tag}
             entities_in_file.append(annotation)
             self._add_to_entity_lookup_map(annotation)
+
             self.text_area.tag_remove(tk.SEL, "1.0", tk.END)
             self.apply_annotations_to_text()
             self.update_entities_list()
-            self.status_var.set(f"Annotated: '{final_text[:30].replace(os.linesep, ' ')}...' as {tag}")
+
+            mode_str = "Word" if self.selection_mode.get() == "word" else "Char"
+            self.status_var.set(f"Annotated ({mode_str}): '{final_text[:30].replace(os.linesep, ' ')}...' as {tag}")
             self._update_button_states()
+
         except tk.TclError:
             pass
         except Exception as e:
