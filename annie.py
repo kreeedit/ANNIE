@@ -63,6 +63,7 @@ class TextAnnotator:
 
         # --- Entity Tagging Configuration ---
         self.entity_tags = ["Person", "Organization", "Location", "Date", "Other"]
+        self.tag_propagation_states = {tag: True for tag in self.entity_tags}
         self.selected_entity_tag = tk.StringVar(value=self.entity_tags[0] if self.entity_tags else "")
         self.extend_to_word = tk.BooleanVar(value=False)
         self.allow_multilabel_overlap = tk.BooleanVar(value=True)
@@ -130,6 +131,9 @@ class TextAnnotator:
             self.root.bind(str(i), self._on_hotkey_press)
         self.root.bind('a', lambda event: self.run_ai_annotation_from_hotkey())
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+        # --- Text Search ---
+        self.root.bind('<Control-f>', self.find_text_dialog)
 
     def _ensure_default_colors(self):
         for tag in self.entity_tags:
@@ -915,6 +919,7 @@ class TextAnnotator:
             "files_list": self.files_list,
             "current_file_index": self.current_file_index,
             "entity_tags": self.entity_tags,
+            "tag_propagation_states": self.tag_propagation_states,
             "relation_types": self.relation_types,
             "tag_colors": self.tag_colors,
             "annotations": self.annotations,
@@ -969,6 +974,8 @@ class TextAnnotator:
             self.files_list = session_data["files_list"]
             self.annotations = session_data["annotations"]
             self.entity_tags = session_data["entity_tags"]
+            loaded_states = session_data.get("tag_propagation_states", {})
+            self.tag_propagation_states = {tag: loaded_states.get(tag, True) for tag in self.entity_tags}
             self.relation_types = session_data["relation_types"]
             self.tag_colors = session_data.get("tag_colors", {})
             self.extend_to_word.set(session_data.get("extend_to_word", False))
@@ -1887,14 +1894,29 @@ class TextAnnotator:
 
     def propagate_annotations(self):
         if not self.current_file_path: return
+
         source_entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         if not source_entities:
             messagebox.showinfo("Info", "No entities in current file to propagate.", parent=self.root)
             return
-        text_to_tag = {ann['text'].strip(): ann['tag'] for ann in sorted(source_entities, key=lambda a: (a['start_line'], a['start_char'])) if ann['text'].strip()}
-        if not text_to_tag: return
-        if not messagebox.askyesno("Confirm Propagation", f"Propagate {len(text_to_tag)} unique entities across all files?", parent=self.root):
+
+        # Filter entities based on states
+        allowed_tags = {tag for tag, allowed in self.tag_propagation_states.items() if allowed}
+
+        filtered_entities = [ann for ann in source_entities if ann['tag'] in allowed_tags]
+
+        if not filtered_entities:
+            messagebox.showinfo("Info", "There are no entities to promote based on the current settings. (Check the 'Manage Entity Tags' menu).", parent=self.root)
             return
+
+        # Itt volt a hiba (a sor végén lévő -- törölve):
+        text_to_tag = {ann['text'].strip(): ann['tag'] for ann in sorted(filtered_entities, key=lambda a: (a['start_line'], a['start_char'])) if ann['text'].strip()}
+
+        if not text_to_tag: return
+
+        if not messagebox.askyesno("Confirm Propagation", f"Propagate {len(text_to_tag)} unique entities (Types: {', '.join(set(text_to_tag.values()))}) across all files?", parent=self.root):
+            return
+
         self._perform_propagation(text_to_tag, "Current File Propagation")
 
     def load_and_propagate_from_dictionary(self):
@@ -1983,7 +2005,128 @@ class TextAnnotator:
         self.status_var.set(f"{source_description} complete. Added {propagated_count} entities across {len(affected_files)} files.")
 
     def manage_entity_tags(self):
-        self._manage_items("Entity Tags", self.entity_tags, self._update_entity_tag_combobox)
+        """
+        Window for managing entity members and propagation settings.
+        """
+        window = tk.Toplevel(self.root)
+        window.title("Manage Entity Tags & Propagation")
+        window.geometry("500x450")
+        window.transient(self.root)
+        window.grab_set()
+
+        # --- List frame (Treeview) ---
+        list_frame = tk.Frame(window)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+
+        # Defining Treeview
+        columns = ("Tag", "Propagate")
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
+        tree.heading("Tag", text="Entity Tag Name", anchor=tk.W)
+        tree.heading("Propagate", text="Auto-Propagate?", anchor=tk.CENTER)
+        tree.column("Tag", width=250, anchor=tk.W)
+        tree.column("Propagate", width=100, anchor=tk.CENTER)
+
+        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Loading data
+        def refresh_list():
+            tree.delete(*tree.get_children())
+            for tag in self.entity_tags:
+                # We ensure that there is an entry in dict
+                if tag not in self.tag_propagation_states:
+                    self.tag_propagation_states[tag] = True
+
+                prop_status = "✅" if self.tag_propagation_states[tag] else "❌"
+                # Color lookup for visual assistance
+                color = self.get_color_for_tag(tag)
+
+                iid = tree.insert("", tk.END, values=(tag, prop_status))
+                try: tree.tag_configure(iid, background=color)
+                except: pass
+                tree.item(iid, tags=(iid,))
+        refresh_list()
+
+        # --- Interakciók ---
+        def toggle_propagation(event):
+            selected_item = tree.selection()
+            if not selected_item: return
+            item_vals = tree.item(selected_item[0], "values")
+            tag_name = item_vals[0]
+
+            # Státusz megfordítása
+            current_state = self.tag_propagation_states.get(tag_name, True)
+            self.tag_propagation_states[tag_name] = not current_state
+            refresh_list()
+            # Kijelölés visszaállítása
+            for child in tree.get_children():
+                if tree.item(child, "values")[0] == tag_name:
+                    tree.selection_set(child)
+                    break
+
+        # Dupla kattintásra vált
+        tree.bind("<Double-1>", toggle_propagation)
+
+        # --- Vezérlőgombok ---
+        controls_frame = tk.Frame(window)
+        controls_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Hozzáadás mező
+        add_frame = tk.Frame(controls_frame)
+        add_frame.pack(fill=tk.X, pady=5)
+        tk.Label(add_frame, text="New Tag:").pack(side=tk.LEFT)
+        new_tag_var = tk.StringVar()
+        entry = tk.Entry(add_frame, textvariable=new_tag_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        def add_tag():
+            tag = new_tag_var.get().strip()
+            if tag and tag not in self.entity_tags:
+                self.entity_tags.append(tag)
+                self.tag_propagation_states[tag] = True # Default True
+                self.entity_tags.sort()
+                refresh_list()
+                new_tag_var.set("")
+            elif tag in self.entity_tags:
+                messagebox.showwarning("Duplicate", "Tag already exists!", parent=window)
+
+        btn_add = tk.Button(add_frame, text="Add", command=add_tag)
+        btn_add.pack(side=tk.LEFT)
+        entry.bind("<Return>", lambda e: add_tag())
+
+        # Törlés / Mentés
+        btn_frame = tk.Frame(controls_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+
+        def remove_tag():
+            selected = tree.selection()
+            if not selected: return
+            tag_to_remove = tree.item(selected[0], "values")[0]
+            if messagebox.askyesno("Confirm", f"Delete tag '{tag_to_remove}'?"):
+                self.entity_tags.remove(tag_to_remove)
+                if tag_to_remove in self.tag_propagation_states:
+                    del self.tag_propagation_states[tag_to_remove]
+                refresh_list()
+
+        btn_remove = tk.Button(btn_frame, text="Remove Selected", command=remove_tag)
+        btn_remove.pack(side=tk.LEFT)
+
+        tk.Label(btn_frame, text="(Double-click a row to toggle Propagation)", fg="grey").pack(side=tk.LEFT, padx=10)
+
+        def save_and_close():
+            # Frissítjük a fő UI-t
+            self._update_entity_tag_combobox()
+            self._configure_text_tags()
+            self.apply_annotations_to_text() # Ha színezés változott volna (itt nem releváns, de biztos ami biztos)
+            window.destroy()
+
+        btn_close = tk.Button(btn_frame, text="Close", command=save_and_close, width=10)
+        btn_close.pack(side=tk.RIGHT)
+
+        window.wait_window()
 
     def manage_relation_types(self):
         self._manage_items("Relation Types", self.relation_types, self._update_relation_type_combobox)
@@ -2404,6 +2547,36 @@ class TextAnnotator:
         finally:
             self.settings_menu.entryconfig("Pre-annotate with AI...", state="normal")
             self._is_annotating_ai = False
+
+    def find_text_dialog(self, event=None):
+        """Egyszerű keresőablak megnyitása."""
+        from tkinter import simpledialog
+        search_term = simpledialog.askstring("Keresés", "Keresett kifejezés:", parent=self.root)
+        if search_term:
+            self._search_text(search_term)
+
+    def _search_text(self, term):
+        """Highlighting and jumping to the searched text."""
+        self.text_area.tag_remove('search_highlight', '1.0', tk.END)
+        self.text_area.tag_config('search_highlight', background='yellow', foreground='black')
+
+        start_pos = '1.0'
+        first_match = None
+        while True:
+            start_pos = self.text_area.search(term, start_pos, stopindex=tk.END, nocase=True)
+            if not start_pos:
+                break
+            end_pos = f"{start_pos}+{len(term)}c"
+            self.text_area.tag_add('search_highlight', start_pos, end_pos)
+            if first_match is None:
+                first_match = start_pos
+            start_pos = end_pos
+
+        if first_match:
+            self.text_area.see(first_match)
+            self.status_var.set(f"Találatok kiemelve: '{term}'")
+        else:
+            messagebox.showinfo("Search", "No results found.", parent=self.root)
 
 def main():
     root = tk.Tk()
