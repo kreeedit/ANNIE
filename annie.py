@@ -208,6 +208,7 @@ class TextAnnotator:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open Directory", command=self.load_directory)
         file_menu.add_command(label="Add File(s) to Session...", command=self.add_files_to_session)
+        file_menu.add_command(label="Convert Session to Sentence Mode...", command=self.convert_session_to_sentences)
         file_menu.add_separator()
         file_menu.add_command(label="Load Session...", command=self.load_session)
         file_menu.add_command(label="Save Session", command=self.save_session)
@@ -622,6 +623,144 @@ class TextAnnotator:
             else:
                 self.status_var.set(f"No .txt files found in '{os.path.basename(directory)}'")
             self._update_button_states()
+
+    def convert_session_to_sentences(self):
+        """
+        A betöltött dokumentumokat mondatokra bontja, és átszámolja az annotációkat.
+        Létrehoz egy új, mondat-alapú munkamenetet.
+        """
+        if not self.files_list:
+            messagebox.showwarning("Nincs adat", "Kérlek, nyiss meg egy mappát vagy tölts be egy munkamenetet először.", parent=self.root)
+            return
+
+        if not messagebox.askyesno("Konvertálás mondatokra",
+                                   "Ez a funkció a jelenlegi dokumentumokat mondatokra bontja.\n"
+                                   "Minden mondat egy külön elem lesz a bal oldali listában, és a meglévő annotációk átszámításra kerülnek.\n\n"
+                                   "A folyamat egy általad választott új mappába menti a mondatokat. Folytatjuk?",
+                                   parent=self.root):
+            return
+
+        save_dir = filedialog.askdirectory(title="Válassz egy mappát a mondatok kimentéséhez", parent=self.root)
+        if not save_dir: return
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.status_var.set("Mondatokra bontás és annotációk migrálása folyamatban...")
+        self.progress_bar.start()
+        self.root.update()
+
+        new_files_list = []
+        new_annotations = {}
+
+        # Egyszerű mondatvége felismerő regex (Pont, felkiáltójel vagy kérdőjel, amit szóköz követ)
+        sentence_end_pattern = re.compile(r'(?<=[.!?])\s+')
+
+        for file_path in self.files_list:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            base_name = os.path.basename(file_path).replace('.txt', '')
+
+            # Mondatok határvonalainak megkeresése
+            sentences = []
+            start_idx = 0
+            for match in sentence_end_pattern.finditer(content):
+                end_idx = match.end()
+                sentences.append((start_idx, end_idx, content[start_idx:end_idx]))
+                start_idx = end_idx
+            if start_idx < len(content):
+                sentences.append((start_idx, len(content), content[start_idx:]))
+
+            file_annotations = self.annotations.get(file_path, {}).get('entities', [])
+            file_relations = self.annotations.get(file_path, {}).get('relations', [])
+
+            for i, (s_start, s_end, s_text) in enumerate(sentences):
+                # Üres vagy csak szóközökből álló "mondatokat" eldobunk
+                if not s_text.strip():
+                    continue
+
+                new_file_name = f"{base_name}_sent_{i+1:04d}.txt"
+                new_file_path = os.path.join(save_dir, new_file_name)
+
+                # Mondat kiírása fizikai fájlba
+                with open(new_file_path, 'w', encoding='utf-8') as f:
+                    f.write(s_text.strip()) # Strip, hogy tiszta training adatot kapjunk
+
+                new_files_list.append(new_file_path)
+                new_annotations[new_file_path] = {"entities": [], "relations": []}
+
+                sentence_entities = []
+                old_id_to_new_id = {}
+
+                # Entitások átszámolása az új mondat-koordináta rendszerbe
+                for ann in file_annotations:
+                    ann_start_abs = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
+                    ann_end_abs = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
+
+                    # Ha az entitás teljesen beleesik ebbe a mondatba
+                    if ann_start_abs >= s_start and ann_end_abs <= s_end:
+                        # Relatív pozíció kiszámítása (figyelembe véve a fenti .strip() miatti eltolódást)
+                        leading_spaces = len(s_text) - len(s_text.lstrip())
+                        rel_start = ann_start_abs - s_start - leading_spaces
+                        rel_end = ann_end_abs - s_start - leading_spaces
+
+                        clean_s_text = s_text.strip()
+                        new_line_starts = [0]
+                        for j, char in enumerate(clean_s_text):
+                            if char == '\n': new_line_starts.append(j + 1)
+                        new_line_starts.append(len(clean_s_text) + 1)
+
+                        new_start_pos = self._char_offset_to_tkinter_index_from_offsets(new_line_starts, rel_start)
+                        new_end_pos = self._char_offset_to_tkinter_index_from_offsets(new_line_starts, rel_end)
+
+                        start_l, start_c = map(int, new_start_pos.split('.'))
+                        end_l, end_c = map(int, new_end_pos.split('.'))
+
+                        new_ann = {
+                            'id': ann['id'],
+                            'start_line': start_l,
+                            'start_char': start_c,
+                            'end_line': end_l,
+                            'end_char': end_c,
+                            'text': ann['text'],
+                            'tag': ann['tag']
+                        }
+                        if 'propagated' in ann:
+                            new_ann['propagated'] = ann['propagated']
+
+                        sentence_entities.append(new_ann)
+                        old_id_to_new_id[ann['id']] = ann['id']
+
+                new_annotations[new_file_path]["entities"] = sentence_entities
+
+                # Relációk migrálása (csak ha a reláció MIND KÉT tagja a mondatban van)
+                sentence_relations = []
+                for rel in file_relations:
+                    if rel['head_id'] in old_id_to_new_id and rel['tail_id'] in old_id_to_new_id:
+                        sentence_relations.append({
+                            'id': rel['id'],
+                            'type': rel['type'],
+                            'head_id': rel['head_id'],
+                            'tail_id': rel['tail_id']
+                        })
+                new_annotations[new_file_path]["relations"] = sentence_relations
+
+        # A UI frissítése az új mondatalapú nézettel
+        self._reset_state()
+        self.files_list = new_files_list
+        self.annotations = new_annotations
+
+        for path in self.files_list:
+            self.files_listbox.insert(tk.END, os.path.basename(path))
+
+        if self.files_list:
+            self.load_file(0)
+
+        self.progress_bar.stop()
+        self.status_var.set(f"Konvertálás kész. {len(self.files_list)} mondat generálva a traininghez.")
+        messagebox.showinfo("Kész", f"Sikeresen szétbontva {len(self.files_list)} mondatra.\nA bal oldali listában mostantól mondatokat látsz dokumentumok helyett.", parent=self.root)
 
     def add_files_to_session(self):
         if not self.files_list:
@@ -2594,34 +2733,109 @@ class TextAnnotator:
             self._is_annotating_ai = False
 
     def find_text_dialog(self, event=None):
-        """Egyszerű keresőablak megnyitása."""
+        """Globális keresőablak megnyitása."""
         from tkinter import simpledialog
-        search_term = simpledialog.askstring("Keresés", "Keresett kifejezés:", parent=self.root)
+        search_term = simpledialog.askstring("Globális Keresés", "Keresett kifejezés a teljes munkamenetben:", parent=self.root)
         if search_term:
-            self._search_text(search_term)
+            self._search_text_globally(search_term)
 
-    def _search_text(self, term):
-        """Highlighting and jumping to the searched text."""
-        self.text_area.tag_remove('search_highlight', '1.0', tk.END)
-        self.text_area.tag_config('search_highlight', background='yellow', foreground='black')
+    def _search_text_globally(self, term):
+        """Keresés az összes betöltött fájlban/mondatban."""
+        if not self.files_list:
+            messagebox.showinfo("Keresés", "Nincs betöltött fájl a munkamenetben.", parent=self.root)
+            return
 
-        start_pos = '1.0'
-        first_match = None
-        while True:
-            start_pos = self.text_area.search(term, start_pos, stopindex=tk.END, nocase=True)
-            if not start_pos:
-                break
-            end_pos = f"{start_pos}+{len(term)}c"
-            self.text_area.tag_add('search_highlight', start_pos, end_pos)
-            if first_match is None:
-                first_match = start_pos
-            start_pos = end_pos
+        matching_files = []
+        term_lower = term.lower()
 
-        if first_match:
-            self.text_area.see(first_match)
-            self.status_var.set(f"Találatok kiemelve: '{term}'")
-        else:
-            messagebox.showinfo("Search", "No results found.", parent=self.root)
+        self.status_var.set(f"Keresés folyamatban: '{term}'...")
+        self.root.update()
+
+        # Végigmegyünk az összes fájlon
+        for idx, file_path in enumerate(self.files_list):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().lower()
+                    if term_lower in content:
+                        matching_files.append((idx, file_path))
+            except Exception:
+                continue
+
+        if not matching_files:
+            self.status_var.set("Keresés befejezve.")
+            messagebox.showinfo("Keresés", f"Nincs találat a teljes munkamenetben a következőre:\n'{term}'", parent=self.root)
+            return
+
+        self.status_var.set(f"Találat {len(matching_files)} fájlban.")
+        self._show_search_results(term, matching_files)
+
+    def _show_search_results(self, term, matching_files):
+        """Eredményablak megjelenítése a találatokkal."""
+        results_window = tk.Toplevel(self.root)
+        results_window.title(f"Keresési eredmények: '{term}'")
+        results_window.geometry("500x300")
+        results_window.transient(self.root)
+
+        tk.Label(results_window, text=f"{len(matching_files)} dokumentumban/mondatban található meg:").pack(anchor=tk.W, padx=10, pady=5)
+
+        list_frame = tk.Frame(results_window)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        results_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
+        results_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=results_listbox.yview)
+
+        # Eredmények listázása
+        for idx, file_path in matching_files:
+            display_name = os.path.basename(file_path)
+            results_listbox.insert(tk.END, f"[{idx + 1}] {display_name}")
+
+        def on_result_double_click(event):
+            selection = results_listbox.curselection()
+            if not selection: return
+            listbox_idx = selection[0]
+            file_idx = matching_files[listbox_idx][0]
+
+            # Betölti a kiválasztott fájlt a fő ablakban
+            self.load_file(file_idx)
+
+            # Kiemeli a keresett szót az aktív nézetben
+            self._highlight_term_in_current_file(term)
+
+        # Dupla kattintás esemény hozzárendelése
+        results_listbox.bind("<Double-Button-1>", on_result_double_click)
+
+        tk.Label(results_window, text="Kattints duplán a fájlra a megnyitáshoz és kiemeléshez.", fg="grey").pack(pady=5)
+
+    def _highlight_term_in_current_file(self, term):
+        """Sárga kiemelés az aktuálisan nyitott szövegben."""
+        original_state = self.text_area.cget('state')
+        self.text_area.config(state=tk.NORMAL)
+        try:
+            self.text_area.tag_remove('search_highlight', '1.0', tk.END)
+            self.text_area.tag_config('search_highlight', background='yellow', foreground='black')
+
+            start_pos = '1.0'
+            first_match = None
+            while True:
+                start_pos = self.text_area.search(term, start_pos, stopindex=tk.END, nocase=True)
+                if not start_pos:
+                    break
+                end_pos = f"{start_pos}+{len(term)}c"
+                self.text_area.tag_add('search_highlight', start_pos, end_pos)
+                if first_match is None:
+                    first_match = start_pos
+                start_pos = end_pos
+
+            if first_match:
+                self.text_area.see(first_match)
+                self.status_var.set(f"Találatok kiemelve: '{term}'")
+        finally:
+            if self.text_area.winfo_exists():
+                self.text_area.config(state=original_state)
 
 def main():
     root = tk.Tk()
