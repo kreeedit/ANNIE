@@ -2194,7 +2194,7 @@ class TextAnnotator:
         """
         window = tk.Toplevel(self.root)
         window.title("Manage Entity Tags & Propagation")
-        window.geometry("500x450")
+        window.geometry("550x450") # Kicsit szélesebb, hogy kényelmesen kiférjenek a gombok
         window.transient(self.root)
         window.grab_set()
 
@@ -2281,7 +2281,7 @@ class TextAnnotator:
         btn_add.pack(side=tk.LEFT)
         entry.bind("<Return>", lambda e: add_tag())
 
-        # Törlés / Mentés
+        # Törlés / Átnevezés / Mentés
         btn_frame = tk.Frame(controls_frame)
         btn_frame.pack(fill=tk.X, pady=5)
 
@@ -2295,16 +2295,67 @@ class TextAnnotator:
                     del self.tag_propagation_states[tag_to_remove]
                 refresh_list()
 
+        # --- ÚJ: ÁTNEVEZÉS FUNKCIÓ ---
+        def rename_tag():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("Infó", "Kérlek válassz ki egy címkét az átnevezéshez!", parent=window)
+                return
+
+            old_tag = tree.item(selected[0], "values")[0]
+
+            from tkinter import simpledialog
+            new_tag = simpledialog.askstring("Címke átnevezése", f"Add meg az új nevet a(z) '{old_tag}' címkének:", initialvalue=old_tag, parent=window)
+
+            if not new_tag: return
+            new_tag = new_tag.strip()
+            if not new_tag or new_tag == old_tag: return
+
+            if new_tag in self.entity_tags:
+                messagebox.showwarning("Hiba", f"A(z) '{new_tag}' címke már létezik. Válassz egyedi nevet!", parent=window)
+                return
+
+            # 1. Frissítjük a globális címkelistát és a beállításokat
+            idx = self.entity_tags.index(old_tag)
+            self.entity_tags[idx] = new_tag
+
+            if old_tag in self.tag_propagation_states:
+                self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag)
+
+            # Megtartjuk az eredeti színt az új névhez
+            if old_tag in self.tag_colors:
+                self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
+
+            # 2. Végigmegyünk az összes annotáción a munkamenetben, és átírjuk a régi címkéket az újra
+            rename_count = 0
+            for file_path, data in self.annotations.items():
+                for entity in data.get("entities", []):
+                    if entity.get("tag") == old_tag:
+                        entity["tag"] = new_tag
+                        rename_count += 1
+
+            # 3. Frissítjük a belső gyorsítótárat az aktív fájlhoz, nehogy eltörjön a törlés/szerkesztés funkció
+            if self.current_file_path:
+                self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
+
+            messagebox.showinfo("Siker", f"Sikeresen átnevezve: '{old_tag}' -> '{new_tag}'.\n\nFrissítve lett {rename_count} darab annotáció a teljes munkamenetben.", parent=window)
+            refresh_list()
+
         btn_remove = tk.Button(btn_frame, text="Remove Selected", command=remove_tag)
         btn_remove.pack(side=tk.LEFT)
 
-        tk.Label(btn_frame, text="(Double-click a row to toggle Propagation)", fg="grey").pack(side=tk.LEFT, padx=10)
+        btn_rename = tk.Button(btn_frame, text="Rename Selected", command=rename_tag)
+        btn_rename.pack(side=tk.LEFT, padx=5)
+
+        tk.Label(btn_frame, text="(Double-click toggles Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
 
         def save_and_close():
-            # Frissítjük a fő UI-t
+            # Frissítjük a fő UI-t a bezáráskor
             self._update_entity_tag_combobox()
             self._configure_text_tags()
-            self.apply_annotations_to_text() # Ha színezés változott volna (itt nem releváns, de biztos ami biztos)
+            if self.current_file_path:
+                self.apply_annotations_to_text()
+                self.update_entities_list()
             window.destroy()
 
         btn_close = tk.Button(btn_frame, text="Close", command=save_and_close, width=10)
