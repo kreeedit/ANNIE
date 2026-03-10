@@ -2366,26 +2366,28 @@ class TextAnnotator:
     def manage_entity_tags(self):
         """
         Window for managing hierarchical entity members, their active state (for hotkeys),
-        and their propagation settings.
+        and their propagation settings, including a live count of occurrences.
         """
         window = tk.Toplevel(self.root)
         window.title("Manage Layered Entity Tags")
-        window.geometry("600x550")
+        window.geometry("650x550") # Kicsit szélesebb lett az új oszlop miatt
         window.transient(self.root)
         window.grab_set()
 
         list_frame = tk.Frame(window)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
 
-        # Hierarchical Treeview
-        columns = ("Active", "Propagate")
+        # --- VÁLTOZÁS: Új 'Count' oszlop hozzáadása ---
+        columns = ("Count", "Active", "Propagate")
         tree = ttk.Treeview(list_frame, columns=columns, selectmode="browse")
         tree.heading("#0", text="Layer / Tag", anchor=tk.W)
+        tree.heading("Count", text="Count", anchor=tk.CENTER)
         tree.heading("Active", text="Active (Hotkeys)", anchor=tk.CENTER)
         tree.heading("Propagate", text="Auto-Propagate", anchor=tk.CENTER)
 
-        tree.column("#0", width=300, anchor=tk.W)
-        tree.column("Active", width=120, anchor=tk.CENTER)
+        tree.column("#0", width=250, anchor=tk.W)
+        tree.column("Count", width=60, anchor=tk.CENTER) # Dedikált oszlop a számoknak
+        tree.column("Active", width=130, anchor=tk.CENTER)
         tree.column("Propagate", width=120, anchor=tk.CENTER)
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -2396,23 +2398,31 @@ class TextAnnotator:
         def refresh_tree():
             tree.delete(*tree.get_children())
             hotkey_counter = 1
-            active_tags = self.get_active_tags()
+
+            # --- VÁLTOZÁS: Annotációk megszámlálása a teljes munkamenetben ---
+            tag_counts = {}
+            for file_path, data in self.annotations.items():
+                for entity in data.get("entities", []):
+                    t = entity.get("tag")
+                    if t:
+                        tag_counts[t] = tag_counts.get(t, 0) + 1
 
             for layer, tags in self.tag_hierarchy.items():
-                # Check if layer is partially/fully active or propagating
                 layer_active = any(self.tag_active_states.get(t, True) for t in tags)
                 layer_prop = any(self.tag_propagation_states.get(t, True) for t in tags)
 
                 l_act = "✅ (Layer)" if layer_active else "❌ (Layer)"
                 l_prop = "✅ (Layer)" if layer_prop else "❌ (Layer)"
 
-                layer_iid = tree.insert("", tk.END, text=layer, values=(l_act, l_prop), open=True)
+                # Réteg (Layer) szintű összesítés
+                layer_count = sum(tag_counts.get(t, 0) for t in tags)
+
+                layer_iid = tree.insert("", tk.END, text=layer, values=(layer_count, l_act, l_prop), open=True)
 
                 for tag in tags:
                     is_active = self.tag_active_states.get(tag, True)
                     is_prop = self.tag_propagation_states.get(tag, True)
 
-                    # Display hotkey number if active
                     act_display = "❌"
                     if is_active:
                         if hotkey_counter <= 10:
@@ -2424,9 +2434,11 @@ class TextAnnotator:
 
                     prop_display = "✅" if is_prop else "❌"
 
-                    tid = tree.insert(layer_iid, tk.END, text=tag, values=(act_display, prop_display))
+                    # Adott Tag darabszáma
+                    count = tag_counts.get(tag, 0)
 
-                    # Apply color background
+                    tid = tree.insert(layer_iid, tk.END, text=tag, values=(count, act_display, prop_display))
+
                     color = self.get_color_for_tag(tag)
                     try: tree.tag_configure(tid, background=color)
                     except: pass
@@ -2438,22 +2450,23 @@ class TextAnnotator:
         def on_tree_double_click(event):
             item_id = tree.identify_row(event.y)
             column = tree.identify_column(event.x)
-            if not item_id or column not in ('#1', '#2'): return
+
+            # Oszlop indexek: #1 = Count (nem kattintható), #2 = Active, #3 = Propagate
+            if not item_id or column not in ('#2', '#3'): return
 
             item_text = tree.item(item_id, 'text')
             parent_id = tree.parent(item_id)
             is_layer = (parent_id == '')
 
-            if column == '#1': # Toggle Active
+            if column == '#2': # Toggle Active
                 if is_layer:
-                    # Toggle all children based on current layer state
                     current_active = any(self.tag_active_states.get(t, True) for t in self.tag_hierarchy[item_text])
                     for t in self.tag_hierarchy[item_text]:
                         self.tag_active_states[t] = not current_active
                 else:
                     self.tag_active_states[item_text] = not self.tag_active_states.get(item_text, True)
 
-            elif column == '#2': # Toggle Propagate
+            elif column == '#3': # Toggle Propagate
                 if is_layer:
                     current_prop = any(self.tag_propagation_states.get(t, True) for t in self.tag_hierarchy[item_text])
                     for t in self.tag_hierarchy[item_text]:
@@ -2462,7 +2475,7 @@ class TextAnnotator:
                     self.tag_propagation_states[item_text] = not self.tag_propagation_states.get(item_text, True)
 
             refresh_tree()
-            self._update_entity_tag_combobox() # Update combobox immediately
+            self._update_entity_tag_combobox()
 
         tree.bind("<Double-1>", on_tree_double_click)
 
@@ -2512,7 +2525,6 @@ class TextAnnotator:
             if not selected: return
             item_id = selected[0]
 
-            # Prevent renaming whole layers
             if tree.parent(item_id) == '':
                 messagebox.showinfo("Info", "Cannot rename entire layers yet, select a Tag.", parent=window)
                 return
@@ -2529,9 +2541,7 @@ class TextAnnotator:
 
             parent_layer = tree.item(tree.parent(item_id), 'text')
 
-            # ==========================================
-            # MERGE SCENARIO (Target tag already exists)
-            # ==========================================
+            # Merge Logic
             if new_tag in self.entity_tags:
                 if not messagebox.askyesno("Merge Tags",
                                            f"The tag '{new_tag}' already exists.\n\n"
@@ -2540,18 +2550,12 @@ class TextAnnotator:
                                            parent=window):
                     return
 
-                # 1. Remove old_tag from the hierarchy
                 self.tag_hierarchy[parent_layer].remove(old_tag)
-
-                # 2. Clean up states for old_tag
                 self.tag_active_states.pop(old_tag, None)
                 self.tag_propagation_states.pop(old_tag, None)
                 self.tag_colors.pop(old_tag, None)
-
-                # 3. Sync the master list
                 self._sync_flat_tags()
 
-                # 4. Update all annotations in the corpus
                 rename_count = 0
                 for file_path, data in self.annotations.items():
                     for entity in data.get("entities", []):
@@ -2559,28 +2563,22 @@ class TextAnnotator:
                             entity["tag"] = new_tag
                             rename_count += 1
 
-                # 5. Rebuild lookup map to prevent Tkinter errors
                 if self.current_file_path:
                     self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
 
                 messagebox.showinfo("Merge Successful", f"Successfully merged '{old_tag}' into '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
 
-            # ==========================================
-            # NORMAL RENAME SCENARIO (New unique tag)
-            # ==========================================
+            # Rename Logic
             else:
-                # Replace in hierarchy
                 idx = self.tag_hierarchy[parent_layer].index(old_tag)
                 self.tag_hierarchy[parent_layer][idx] = new_tag
 
-                # Migrate states & colors
                 self.tag_active_states[new_tag] = self.tag_active_states.pop(old_tag, True)
                 self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag, True)
                 if old_tag in self.tag_colors:
                     self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
                 self._sync_flat_tags()
 
-                # Update annotations
                 rename_count = 0
                 for file_path, data in self.annotations.items():
                     for entity in data.get("entities", []):
@@ -2593,7 +2591,6 @@ class TextAnnotator:
 
                 messagebox.showinfo("Rename Successful", f"Renamed to '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
 
-            # Refresh UI elements
             refresh_tree()
             self._update_entity_tag_combobox()
 
