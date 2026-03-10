@@ -2107,35 +2107,68 @@ class TextAnnotator:
         if not self.files_list: return
         dict_path = filedialog.askopenfilename(title="Select Dictionary File", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
         if not dict_path: return
+        
         dictionary_mapping = {}
+        missing_tags = set()
+        
         try:
             with open(dict_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip() and not line.startswith('#'):
-                        parts = line.strip().split(None, 1)
-                        if len(parts) == 2 and parts[1] in self.entity_tags:
-                            dictionary_mapping[parts[0]] = parts[1]
+                        # Hátulról vágjuk a legutolsó szóköz mentén
+                        parts = line.strip().rsplit(None, 1)
+                        if len(parts) == 2:
+                            term = parts[0].strip()
+                            tag = parts[1].strip()
+                            dictionary_mapping[term] = tag
+                            
+                            # Gyűjtjük azokat a címkéket, amik még nem léteznek a rendszerben
+                            if tag not in self.entity_tags:
+                                missing_tags.add(tag)
         except Exception as e:
             messagebox.showerror("Dict Read Error", f"Failed to read dictionary:\n{e}", parent=self.root)
             return
+            
+        # Ha a szótárban új/ismeretlen címkék vannak, AUTOMATIKUSAN hozzáadjuk őket (ha a user is akarja)
+        if missing_tags:
+            msg = (f"The dictionary contains new tags that ANNIE did not know before:\n\n"
+                   f"{', '.join(missing_tags)}\n\n"
+                   f"Would you like the system to AUTOMATICALLY ADD these to the session?")
+            
+            if messagebox.askyesno("Adding new tags", msg, parent=self.root):
+                # Új címkék regisztrálása
+                for t in missing_tags:
+                    if t not in self.entity_tags:
+                        self.entity_tags.append(t)
+                        self.tag_propagation_states[t] = True
+                
+                # UI, színek és legördülő menük frissítése
+                self._update_entity_tag_combobox()
+                self._configure_text_tags()
+            else:
+                # Ha nem akarja felvenni őket, akkor csak az ismert címkéjű szavakat tartjuk meg
+                dictionary_mapping = {k: v for k, v in dictionary_mapping.items() if v not in missing_tags}
+
         if not dictionary_mapping:
-            messagebox.showinfo("Info", "No valid entries found in dictionary.", parent=self.root)
+            messagebox.showinfo("Info", "No valid data left in the dictionary.", parent=self.root)
             return
+            
         if not messagebox.askyesno("Confirm Propagation", f"Propagate {len(dictionary_mapping)} entities from dictionary?", parent=self.root):
             return
+            
         self._perform_propagation(dictionary_mapping, "Dictionary Propagation")
 
     def _perform_propagation(self, text_to_tag_map, source_description):
-        """
-        Optimized with a single pre-compiled regex for all patterns and caching file content.
-        """
         propagated_count, affected_files = 0, set()
-        allow_overlap = self.allow_multilabel_overlap.get()
-        lower_case_text_to_tag_map = {text.lower(): tag for text, tag in text_to_tag_map.items()}
-        sorted_texts = sorted(text_to_tag_map.keys(), key=len, reverse=True)
-        pattern = '|'.join(r'\b' + re.escape(text) + r'\b' for text in sorted_texts)
-        regex = re.compile(pattern, re.IGNORECASE)
+        
+        # Kikényszerítjük az átfedést a szótárnál!
+        if "Dictionary" in source_description:
+            allow_overlap = True
+        else:
+            allow_overlap = self.allow_multilabel_overlap.get()
+        
         self.status_var.set(f"Starting {source_description}..."); self.root.update()
+        
         file_contents = {}
         for file_path in self.files_list:
             try:
@@ -2143,6 +2176,18 @@ class TextAnnotator:
                     file_contents[file_path] = f.read()
             except Exception:
                 continue
+
+        # Külön Regex mintát fordítunk minden szótári elemhez, 
+        # így a Regex motor megengedi az átfedéseket a különböző keresések között.
+        compiled_regexes = []
+        for text, tag in text_to_tag_map.items():
+            pattern = r'\b' + re.escape(text) + r'\b'
+            compiled_regexes.append((re.compile(pattern, re.IGNORECASE), tag, text))
+            
+        # Rendezzük hossz szerint csökkenőbe. Ha az "Overlap" (Többszörös címkézés) ki van kapcsolva
+        # a beállításokban, akkor is a leghosszabb (legspecifikusabb) kifejezés fog nyerni.
+        compiled_regexes.sort(key=lambda x: len(x[2]), reverse=True)
+
         for file_path, content in file_contents.items():
             target_entities = self.annotations.setdefault(file_path, {"entities": [], "relations": []})['entities']
             existing_spans_and_tags = {(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag']) for ann in target_entities}
@@ -2153,32 +2198,34 @@ class TextAnnotator:
                     line_starts.append(i + 1)
             line_starts.append(len(content) + 1)
 
-            for match in regex.finditer(content):
-                matched_text = match.group()
-                tag = lower_case_text_to_tag_map.get(matched_text.lower())
-                if not tag:
-                    continue
-                start_index, end_index = match.span()
+            # Szavanként haladunk végig a dokumentumon
+            for regex, tag, matched_text_original in compiled_regexes:
+                for match in regex.finditer(content):
+                    matched_text = match.group()
+                    start_index, end_index = match.span()
 
-                start_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, start_index)
-                end_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, end_index)
-                start_l, start_c = map(int, start_pos.split('.'))
-                end_l, end_c = map(int, end_pos.split('.'))
-                current_span_and_tag = (start_l, start_c, end_l, end_c, tag)
-                if current_span_and_tag in existing_spans_and_tags:
-                    continue
-                if not allow_overlap and self._is_overlapping_in_list(start_l, start_c, end_l, end_c, target_entities):
-                    continue
+                    start_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, start_index)
+                    end_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, end_index)
+                    start_l, start_c = map(int, start_pos.split('.'))
+                    end_l, end_c = map(int, end_pos.split('.'))
+                    current_span_and_tag = (start_l, start_c, end_l, end_c, tag)
+                    
+                    if current_span_and_tag in existing_spans_and_tags:
+                        continue
+                        
+                    # Ha az átfedés nincs engedélyezve, ellenőrizzük, hogy ütközik-e már meglévővel
+                    if not allow_overlap and self._is_overlapping_in_list(start_l, start_c, end_l, end_c, target_entities):
+                        continue
 
-                new_ann = {
-                    'id': uuid.uuid4().hex, 'start_line': start_l, 'start_char': start_c,
-                    'end_line': end_l, 'end_char': end_c, 'text': matched_text,
-                    'tag': tag, 'propagated': True
-                }
-                target_entities.append(new_ann)
-                existing_spans_and_tags.add(current_span_and_tag)
-                propagated_count += 1
-                affected_files.add(file_path)
+                    new_ann = {
+                        'id': uuid.uuid4().hex, 'start_line': start_l, 'start_char': start_c,
+                        'end_line': end_l, 'end_char': end_c, 'text': matched_text,
+                        'tag': tag, 'propagated': True
+                    }
+                    target_entities.append(new_ann)
+                    existing_spans_and_tags.add(current_span_and_tag)
+                    propagated_count += 1
+                    affected_files.add(file_path)
 
         if self.current_file_path in affected_files:
             self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {})['entities'])
@@ -2187,6 +2234,7 @@ class TextAnnotator:
 
         self._update_button_states()
         self.status_var.set(f"{source_description} complete. Added {propagated_count} entities across {len(affected_files)} files.")
+
 
     def manage_entity_tags(self):
         """
