@@ -63,9 +63,9 @@ class TextAnnotator:
 
         # --- Entity Tagging Configuration (Hierarchical) ---
         self.tag_hierarchy = {
-            "CORE Layer": ["PER", "LOC", "INST", "DAT", "TIM"],
+            "CORE Layer": ["PER", "LOC", "INS", "DAT", "TIM"],
             "ANALYTICAL Layer": ["TITLE", "REL", "TAX", "MEA", "COM", "EST", "MON", "NUM", "LEG", "NAT"],
-            "SPAN Layer": ["ACT", "PRO", "TRA"]
+            "SPAN Layer": ["ACTOR", "PROP", "TRANS"]
         }
         # Tracks whether a tag is active (available for hotkeys and dropdown)
         self.tag_active_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
@@ -2511,43 +2511,89 @@ class TextAnnotator:
             selected = tree.selection()
             if not selected: return
             item_id = selected[0]
+
+            # Prevent renaming whole layers
             if tree.parent(item_id) == '':
                 messagebox.showinfo("Info", "Cannot rename entire layers yet, select a Tag.", parent=window)
                 return
 
             old_tag = tree.item(item_id, 'text')
             from tkinter import simpledialog
-            new_tag = simpledialog.askstring("Rename Tag", f"New name for '{old_tag}':", initialvalue=old_tag, parent=window)
+            new_tag = simpledialog.askstring("Rename / Merge Tag",
+                                             f"New name for '{old_tag}':\n(If you type an existing tag, they will be merged)",
+                                             initialvalue=old_tag, parent=window)
 
             if not new_tag: return
             new_tag = new_tag.strip()
             if not new_tag or new_tag == old_tag: return
-            if new_tag in self.entity_tags:
-                messagebox.showwarning("Error", "Tag name already exists!", parent=window)
-                return
 
-            # Replace in hierarchy
             parent_layer = tree.item(tree.parent(item_id), 'text')
-            idx = self.tag_hierarchy[parent_layer].index(old_tag)
-            self.tag_hierarchy[parent_layer][idx] = new_tag
 
-            # Migrate states & colors
-            self.tag_active_states[new_tag] = self.tag_active_states.pop(old_tag, True)
-            self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag, True)
-            if old_tag in self.tag_colors: self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
-            self._sync_flat_tags()
+            # ==========================================
+            # MERGE SCENARIO (Target tag already exists)
+            # ==========================================
+            if new_tag in self.entity_tags:
+                if not messagebox.askyesno("Merge Tags",
+                                           f"The tag '{new_tag}' already exists.\n\n"
+                                           f"Do you want to MERGE all '{old_tag}' annotations into '{new_tag}'?\n\n"
+                                           f"This will remove '{old_tag}' from the list entirely.",
+                                           parent=window):
+                    return
 
-            # Update annotations
-            rename_count = 0
-            for file_path, data in self.annotations.items():
-                for entity in data.get("entities", []):
-                    if entity.get("tag") == old_tag:
-                        entity["tag"] = new_tag
-                        rename_count += 1
-            if self.current_file_path:
-                self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
+                # 1. Remove old_tag from the hierarchy
+                self.tag_hierarchy[parent_layer].remove(old_tag)
 
-            messagebox.showinfo("Success", f"Renamed to '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
+                # 2. Clean up states for old_tag
+                self.tag_active_states.pop(old_tag, None)
+                self.tag_propagation_states.pop(old_tag, None)
+                self.tag_colors.pop(old_tag, None)
+
+                # 3. Sync the master list
+                self._sync_flat_tags()
+
+                # 4. Update all annotations in the corpus
+                rename_count = 0
+                for file_path, data in self.annotations.items():
+                    for entity in data.get("entities", []):
+                        if entity.get("tag") == old_tag:
+                            entity["tag"] = new_tag
+                            rename_count += 1
+
+                # 5. Rebuild lookup map to prevent Tkinter errors
+                if self.current_file_path:
+                    self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
+
+                messagebox.showinfo("Merge Successful", f"Successfully merged '{old_tag}' into '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
+
+            # ==========================================
+            # NORMAL RENAME SCENARIO (New unique tag)
+            # ==========================================
+            else:
+                # Replace in hierarchy
+                idx = self.tag_hierarchy[parent_layer].index(old_tag)
+                self.tag_hierarchy[parent_layer][idx] = new_tag
+
+                # Migrate states & colors
+                self.tag_active_states[new_tag] = self.tag_active_states.pop(old_tag, True)
+                self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag, True)
+                if old_tag in self.tag_colors:
+                    self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
+                self._sync_flat_tags()
+
+                # Update annotations
+                rename_count = 0
+                for file_path, data in self.annotations.items():
+                    for entity in data.get("entities", []):
+                        if entity.get("tag") == old_tag:
+                            entity["tag"] = new_tag
+                            rename_count += 1
+
+                if self.current_file_path:
+                    self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
+
+                messagebox.showinfo("Rename Successful", f"Renamed to '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
+
+            # Refresh UI elements
             refresh_tree()
             self._update_entity_tag_combobox()
 
