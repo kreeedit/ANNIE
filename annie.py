@@ -145,6 +145,20 @@ class TextAnnotator:
 
         # --- Text Search ---
         self.root.bind('<Control-f>', self.find_text_dialog)
+        
+    def _sync_flat_tags(self):
+        """Synchronizes the flat entity_tags list with the current hierarchy."""
+        self.entity_tags = [tag for tags in self.tag_hierarchy.values() for tag in tags]
+
+    def get_active_tags(self):
+        """Returns a flat list of currently ACTIVE tags in hierarchical order."""
+        active = []
+        for layer, tags in self.tag_hierarchy.items():
+            for tag in tags:
+                if self.tag_active_states.get(tag, True):
+                    active.append(tag)
+        return active
+
 
     def _sync_flat_tags(self):
         """Synchronizes the flat entity_tags list with the current hierarchy."""
