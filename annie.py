@@ -2834,20 +2834,20 @@ class TextAnnotator:
     def find_text_dialog(self, event=None):
         """Globális keresőablak megnyitása."""
         from tkinter import simpledialog
-        search_term = simpledialog.askstring("Globális Keresés", "Keresett kifejezés a teljes munkamenetben:", parent=self.root)
+        search_term = simpledialog.askstring("Global Search", "Search term in entire session::", parent=self.root)
         if search_term:
             self._search_text_globally(search_term)
 
     def _search_text_globally(self, term):
         """Keresés az összes betöltött fájlban/mondatban."""
         if not self.files_list:
-            messagebox.showinfo("Keresés", "Nincs betöltött fájl a munkamenetben.", parent=self.root)
+            messagebox.showinfo("Search", "No files loaded in session.", parent=self.root)
             return
 
         matching_files = []
         term_lower = term.lower()
 
-        self.status_var.set(f"Keresés folyamatban: '{term}'...")
+        self.status_var.set(f"Search in progress: '{term}'...")
         self.root.update()
 
         # Végigmegyünk az összes fájlon
@@ -2861,8 +2861,8 @@ class TextAnnotator:
                 continue
 
         if not matching_files:
-            self.status_var.set("Keresés befejezve.")
-            messagebox.showinfo("Keresés", f"Nincs találat a teljes munkamenetben a következőre:\n'{term}'", parent=self.root)
+            self.status_var.set("Search complete.")
+            messagebox.showinfo("Search", f"No results found in the entire session for the following:\n'{term}'", parent=self.root)
             return
 
         self.status_var.set(f"Találat {len(matching_files)} fájlban.")
@@ -2871,11 +2871,11 @@ class TextAnnotator:
     def _show_search_results(self, term, matching_files):
         """Eredményablak megjelenítése a találatokkal."""
         results_window = tk.Toplevel(self.root)
-        results_window.title(f"Keresési eredmények: '{term}'")
+        results_window.title(f"Search result: '{term}'")
         results_window.geometry("500x300")
         results_window.transient(self.root)
 
-        tk.Label(results_window, text=f"{len(matching_files)} dokumentumban/mondatban található meg:").pack(anchor=tk.W, padx=10, pady=5)
+        tk.Label(results_window, text=f"{len(matching_files)} found in the document/sentence:").pack(anchor=tk.W, padx=10, pady=5)
 
         list_frame = tk.Frame(results_window)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -2907,7 +2907,7 @@ class TextAnnotator:
         # Dupla kattintás esemény hozzárendelése
         results_listbox.bind("<Double-Button-1>", on_result_double_click)
 
-        tk.Label(results_window, text="Kattints duplán a fájlra a megnyitáshoz és kiemeléshez.", fg="grey").pack(pady=5)
+        tk.Label(results_window, text="Double-click on the file to open and highlight it.", fg="grey").pack(pady=5)
 
     def _highlight_term_in_current_file(self, term):
         """Sárga kiemelés az aktuálisan nyitott szövegben."""
@@ -2931,7 +2931,7 @@ class TextAnnotator:
 
             if first_match:
                 self.text_area.see(first_match)
-                self.status_var.set(f"Találatok kiemelve: '{term}'")
+                self.status_var.set(f"Highlights: '{term}'")
         finally:
             if self.text_area.winfo_exists():
                 self.text_area.config(state=original_state)
