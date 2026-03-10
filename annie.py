@@ -61,10 +61,20 @@ class TextAnnotator:
         self.line_start_offsets = [0] # Stores character offsets for the start of each line
         self._entity_lookup_map = {} # Maps unique entity keys to entity dicts for fast lookup
 
-        # --- Entity Tagging Configuration ---
-        self.entity_tags = ["Person", "Organization", "Location", "Date", "Other"]
-        self.tag_propagation_states = {tag: True for tag in self.entity_tags}
-        self.selected_entity_tag = tk.StringVar(value=self.entity_tags[0] if self.entity_tags else "")
+        # --- Entity Tagging Configuration (Hierarchical) ---
+        self.tag_hierarchy = {
+            "CORE Layer": ["PER", "LOC", "INST", "DAT", "TIM"],
+            "ANALYTICAL Layer": ["TITLE", "REL", "TAX", "MEA", "COM", "EST", "MON", "NUM", "LEG", "NAT"],
+            "SPAN Layer": ["ACT", "PRO", "TRA"]
+        }
+        # Tracks whether a tag is active (available for hotkeys and dropdown)
+        self.tag_active_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
+        # Tracks whether a tag should be auto-propagated
+        self.tag_propagation_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
+
+        self.entity_tags = [] # Will be populated by sync function
+        self._sync_flat_tags()
+        self.selected_entity_tag = tk.StringVar(value=self.get_active_tags()[0] if self.get_active_tags() else "")
         self.extend_to_word = tk.BooleanVar(value=False)
         self.allow_multilabel_overlap = tk.BooleanVar(value=True)
 
@@ -136,6 +146,20 @@ class TextAnnotator:
         # --- Text Search ---
         self.root.bind('<Control-f>', self.find_text_dialog)
 
+    def _sync_flat_tags(self):
+        """Synchronizes the flat entity_tags list with the current hierarchy."""
+        self.entity_tags = [tag for tags in self.tag_hierarchy.values() for tag in tags]
+
+    def get_active_tags(self):
+        """Returns a flat list of currently ACTIVE tags in hierarchical order."""
+        active = []
+        for layer, tags in self.tag_hierarchy.items():
+            for tag in tags:
+                if self.tag_active_states.get(tag, True):
+                    active.append(tag)
+        return active
+
+
     def _ensure_default_colors(self):
         for tag in self.entity_tags:
             self.get_color_for_tag(tag)
@@ -148,14 +172,21 @@ class TextAnnotator:
     def _on_hotkey_press(self, event):
         """
         Handles number key presses to re-label selected entities or set the current tag.
-        Optimized to use the new lookup map.
+        Uses ONLY the currently active tags.
         """
         try:
             key_num = int(event.keysym)
+            # A 0-ás gomb a 10. elem (index 9), az 1-es az 1. elem (index 0)
             tag_index = (key_num - 1) % 10 if key_num != 0 else 9
-            if not (0 <= tag_index < len(self.entity_tags)): return
 
-            new_tag = self.entity_tags[tag_index]
+            # Lekérjük az aktuálisan aktív címkék listáját
+            active_tags = self.get_active_tags()
+
+            # Ellenőrizzük, hogy a megnyomott számhoz tartozik-e aktív címke
+            if not (0 <= tag_index < len(active_tags)): return
+
+            # Kiválasztjuk az új címkét a szám alapján
+            new_tag = active_tags[tag_index]
             selected_iids = self.entities_tree.selection()
 
             if selected_iids:
@@ -173,17 +204,21 @@ class TextAnnotator:
                             entities_to_relabel.append(entity)
                     except (ValueError, IndexError):
                         continue
+
                 if not entities_to_relabel:
                     self.status_var.set("No valid entities selected for relabeling.")
                     return
+
                 # Update the tags and then the lookup map
                 for entity_dict in entities_to_relabel:
                     # Remove old entry from map
                     old_key = (entity_dict['id'], entity_dict['start_line'], entity_dict['start_char'],
                                entity_dict['end_line'], entity_dict['end_char'], entity_dict['tag'])
                     self._entity_lookup_map.pop(old_key, None)
+
                     # Update tag
                     entity_dict['tag'] = new_tag
+
                     # Add new entry to map
                     new_key = (entity_dict['id'], entity_dict['start_line'], entity_dict['start_char'],
                                entity_dict['end_line'], entity_dict['end_char'], new_tag)
@@ -559,13 +594,15 @@ class TextAnnotator:
 
     def _update_entity_tag_combobox(self):
         current_selection = self.selected_entity_tag.get()
-        if not self.entity_tags:
+        active_tags = self.get_active_tags()
+
+        if not active_tags:
             self.selected_entity_tag.set("")
             self.entity_tag_combobox.config(values=[], state=tk.DISABLED)
         else:
-            self.entity_tag_combobox['values'] = self.entity_tags
-            if current_selection not in self.entity_tags:
-                self.selected_entity_tag.set(self.entity_tags[0])
+            self.entity_tag_combobox['values'] = active_tags
+            if current_selection not in active_tags:
+                self.selected_entity_tag.set(active_tags[0])
             self.entity_tag_combobox.config(state="readonly")
 
     def _update_relation_type_combobox(self):
@@ -586,7 +623,9 @@ class TextAnnotator:
         num_relations_selected = len(self.relations_tree.selection())
         self.prev_btn.config(state=tk.NORMAL if has_files and self.current_file_index > 0 else tk.DISABLED)
         self.next_btn.config(state=tk.NORMAL if has_files and self.current_file_index < len(self.files_list) - 1 else tk.DISABLED)
-        self.annotate_btn.config(state=tk.NORMAL if file_loaded and self.entity_tags else tk.DISABLED)
+
+        self.annotate_btn.config(state=tk.NORMAL if file_loaded and self.get_active_tags() else tk.DISABLED)
+
         self.remove_entity_btn.config(state=tk.NORMAL if num_entities_selected_rows > 0 else tk.DISABLED)
         self.merge_entities_btn.config(state=tk.NORMAL if num_entities_selected_rows >= 2 else tk.DISABLED)
         can_propagate_current = file_loaded and self.annotations.get(self.current_file_path, {}).get("entities")
@@ -626,67 +665,94 @@ class TextAnnotator:
 
     def convert_session_to_sentences(self):
         """
-        A betöltött dokumentumokat mondatokra bontja, és átszámolja az annotációkat.
-        Létrehoz egy új, mondat-alapú munkamenetet.
+        Splits loaded documents into sentences and recalculates annotation offsets.
+        Creates a new sentence-based session for ML training.
         """
         if not self.files_list:
-            messagebox.showwarning("Nincs adat", "Kérlek, nyiss meg egy mappát vagy tölts be egy munkamenetet először.", parent=self.root)
+            messagebox.showwarning("No Data", "Please open a directory or load a session first.", parent=self.root)
             return
 
-        if not messagebox.askyesno("Konvertálás mondatokra",
-                                   "Ez a funkció a jelenlegi dokumentumokat mondatokra bontja.\n"
-                                   "Minden mondat egy külön elem lesz a bal oldali listában, és a meglévő annotációk átszámításra kerülnek.\n\n"
-                                   "A folyamat egy általad választott új mappába menti a mondatokat. Folytatjuk?",
+        if not messagebox.askyesno("Convert to Sentences",
+                                   "This function will split the current documents into sentences.\n"
+                                   "Each sentence will become a separate item in the left list, and existing annotations will be recalculated.\n\n"
+                                   "The process will save the sentences into a new folder of your choice. Continue?",
                                    parent=self.root):
             return
 
-        save_dir = filedialog.askdirectory(title="Válassz egy mappát a mondatok kimentéséhez", parent=self.root)
+        save_dir = filedialog.askdirectory(title="Select a folder to save sentences", parent=self.root)
         if not save_dir: return
+
+        # Ensure the target directory exists to prevent FileNotFoundError
         os.makedirs(save_dir, exist_ok=True)
 
-        self.status_var.set("Mondatokra bontás és annotációk migrálása folyamatban...")
+        self.status_var.set("Splitting into sentences and migrating annotations...")
         self.progress_bar.start()
         self.root.update()
 
         new_files_list = []
         new_annotations = {}
 
-        # Egyszerű mondatvége felismerő regex (Pont, felkiáltójel vagy kérdőjel, amit szóköz követ)
-        sentence_end_pattern = re.compile(r'(?<=[.!?])\s+')
+        # ---------------------------------------------------------------------
+        # BUGFIX & IMPROVEMENT:
+        # Previously, the regex only looked for spaces after a punctuation mark.
+        # This failed to split sentences that were separated by newlines (\n)
+        # but lacked punctuation at the end.
+        # Now, it splits by standard punctuation (.!?) followed by space,
+        # OR by explicit line breaks (newlines).
+        # ---------------------------------------------------------------------
+        sentence_end_pattern = re.compile(r'(?<=[.!?])\s+|\n+')
 
         for file_path in self.files_list:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-            except Exception:
+            except Exception as e:
+                print(f"Error reading file {file_path}: {e}")
                 continue
 
             base_name = os.path.basename(file_path).replace('.txt', '')
 
-            # Mondatok határvonalainak megkeresése
+            # -----------------------------------------------------------------
+            # Step 1: Find sentence boundaries using the improved regex
+            # -----------------------------------------------------------------
             sentences = []
             start_idx = 0
             for match in sentence_end_pattern.finditer(content):
                 end_idx = match.end()
-                sentences.append((start_idx, end_idx, content[start_idx:end_idx]))
+                # Extract the sentence text based on the found offsets
+                s_text = content[start_idx:end_idx]
+                if s_text.strip(): # Only add non-empty sentences
+                    sentences.append((start_idx, end_idx, s_text))
                 start_idx = end_idx
-            if start_idx < len(content):
-                sentences.append((start_idx, len(content), content[start_idx:]))
 
+            # Add any remaining text as the last sentence (if text doesn't end with punctuation)
+            if start_idx < len(content):
+                s_text = content[start_idx:]
+                if s_text.strip():
+                    sentences.append((start_idx, len(content), s_text))
+
+            # Retrieve existing annotations for the current file
             file_annotations = self.annotations.get(file_path, {}).get('entities', [])
             file_relations = self.annotations.get(file_path, {}).get('relations', [])
 
+            # -----------------------------------------------------------------
+            # Step 2: Process each sentence and recalculate annotation offsets
+            # -----------------------------------------------------------------
             for i, (s_start, s_end, s_text) in enumerate(sentences):
-                # Üres vagy csak szóközökből álló "mondatokat" eldobunk
+                # Discard sentences that are purely whitespace
                 if not s_text.strip():
                     continue
 
                 new_file_name = f"{base_name}_sent_{i+1:04d}.txt"
                 new_file_path = os.path.join(save_dir, new_file_name)
 
-                # Mondat kiírása fizikai fájlba
-                with open(new_file_path, 'w', encoding='utf-8') as f:
-                    f.write(s_text.strip()) # Strip, hogy tiszta training adatot kapjunk
+                # Write the clean (stripped) sentence to the new file
+                try:
+                    with open(new_file_path, 'w', encoding='utf-8') as f:
+                        f.write(s_text.strip())
+                except Exception as e:
+                    print(f"Error writing sentence file {new_file_path}: {e}")
+                    continue
 
                 new_files_list.append(new_file_path)
                 new_annotations[new_file_path] = {"entities": [], "relations": []}
@@ -694,29 +760,49 @@ class TextAnnotator:
                 sentence_entities = []
                 old_id_to_new_id = {}
 
-                # Entitások átszámolása az új mondat-koordináta rendszerbe
+                # -------------------------------------------------------------
+                # Step 3: Migrate Entity Annotations
+                # -------------------------------------------------------------
                 for ann in file_annotations:
-                    ann_start_abs = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
-                    ann_end_abs = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
+                    # Convert original Tkinter indices back to absolute character offsets
+                    try:
+                        ann_start_abs = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
+                        ann_end_abs = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
+                    except Exception as e:
+                        print(f"Skipping malformed annotation {ann.get('id')}: {e}")
+                        continue
 
-                    # Ha az entitás teljesen beleesik ebbe a mondatba
+                    # Check if the annotation falls entirely within the current sentence's boundaries
                     if ann_start_abs >= s_start and ann_end_abs <= s_end:
-                        # Relatív pozíció kiszámítása (figyelembe véve a fenti .strip() miatti eltolódást)
+
+                        # Calculate the relative start and end positions.
+                        # We must account for the characters removed by .strip()
                         leading_spaces = len(s_text) - len(s_text.lstrip())
                         rel_start = ann_start_abs - s_start - leading_spaces
                         rel_end = ann_end_abs - s_start - leading_spaces
 
                         clean_s_text = s_text.strip()
+
+                        # Clamp the values to prevent out-of-bounds errors
+                        # in case trailing spaces were part of the user's selection
+                        rel_start = max(0, rel_start)
+                        rel_end = min(len(clean_s_text), rel_end)
+
+                        # Recalculate line offsets for the new, isolated sentence text
                         new_line_starts = [0]
                         for j, char in enumerate(clean_s_text):
                             if char == '\n': new_line_starts.append(j + 1)
                         new_line_starts.append(len(clean_s_text) + 1)
 
+                        # Convert the new relative character offsets back to Tkinter index formats
                         new_start_pos = self._char_offset_to_tkinter_index_from_offsets(new_line_starts, rel_start)
                         new_end_pos = self._char_offset_to_tkinter_index_from_offsets(new_line_starts, rel_end)
 
-                        start_l, start_c = map(int, new_start_pos.split('.'))
-                        end_l, end_c = map(int, new_end_pos.split('.'))
+                        try:
+                            start_l, start_c = map(int, new_start_pos.split('.'))
+                            end_l, end_c = map(int, new_end_pos.split('.'))
+                        except ValueError:
+                            continue # Skip if parsing fails
 
                         new_ann = {
                             'id': ann['id'],
@@ -735,9 +821,13 @@ class TextAnnotator:
 
                 new_annotations[new_file_path]["entities"] = sentence_entities
 
-                # Relációk migrálása (csak ha a reláció MIND KÉT tagja a mondatban van)
+                # -------------------------------------------------------------
+                # Step 4: Migrate Relation Annotations
+                # -------------------------------------------------------------
                 sentence_relations = []
                 for rel in file_relations:
+                    # Only keep the relation if BOTH the head and tail entities
+                    # exist in the current sentence
                     if rel['head_id'] in old_id_to_new_id and rel['tail_id'] in old_id_to_new_id:
                         sentence_relations.append({
                             'id': rel['id'],
@@ -747,20 +837,24 @@ class TextAnnotator:
                         })
                 new_annotations[new_file_path]["relations"] = sentence_relations
 
-        # A UI frissítése az új mondatalapú nézettel
+        # ---------------------------------------------------------------------
+        # Step 5: Update the UI with the new sentence-based session
+        # ---------------------------------------------------------------------
         self._reset_state()
         self.files_list = new_files_list
         self.annotations = new_annotations
 
+        # Populate the left-side listbox with the new sentence files
         for path in self.files_list:
             self.files_listbox.insert(tk.END, os.path.basename(path))
 
+        # Load the very first sentence to view
         if self.files_list:
             self.load_file(0)
 
         self.progress_bar.stop()
-        self.status_var.set(f"Konvertálás kész. {len(self.files_list)} mondat generálva a traininghez.")
-        messagebox.showinfo("Kész", f"Sikeresen szétbontva {len(self.files_list)} mondatra.\nA bal oldali listában mostantól mondatokat látsz dokumentumok helyett.", parent=self.root)
+        self.status_var.set(f"Conversion complete. Generated {len(self.files_list)} sentences for training.")
+        messagebox.showinfo("Done", f"Successfully split into {len(self.files_list)} sentences.\nThe left panel now displays sentences instead of whole documents.", parent=self.root)
 
     def add_files_to_session(self):
         if not self.files_list:
@@ -844,7 +938,7 @@ class TextAnnotator:
             self._update_button_states()
 
     def save_schema(self):
-        """Saves the current entity tags and relation types to a JSON file."""
+        """Saves the current hierarchical entity tags and relation types to a JSON file."""
         save_path = filedialog.asksaveasfilename(
             title="Save Tag/Relation Schema",
             defaultextension=".json",
@@ -853,7 +947,8 @@ class TextAnnotator:
         if not save_path:
             return
         schema_data = {
-            "entity_tags": self.entity_tags,
+            "tag_hierarchy": self.tag_hierarchy, # VÁLTOZÁS ITT
+            "tag_active_states": self.tag_active_states, # VÁLTOZÁS ITT
             "relation_types": self.relation_types
         }
         try:
@@ -864,7 +959,7 @@ class TextAnnotator:
             messagebox.showerror("Save Error", f"Could not save schema file:\n{e}", parent=self.root)
 
     def load_schema(self):
-        """Loads entity tags and relation types from a JSON file, replacing the current ones."""
+        """Loads hierarchical entity tags and relation types from a JSON file."""
         if self.annotations and not messagebox.askyesno("Confirm Load",
                                                        "Loading a new schema will replace your current tags. This may affect existing annotations if the tags don't match.\n\nContinue?"):
             return
@@ -877,10 +972,19 @@ class TextAnnotator:
         try:
             with open(load_path, 'r', encoding='utf-8') as f:
                 schema_data = json.load(f)
-            if "entity_tags" not in schema_data or "relation_types" not in schema_data:
+
+            if "tag_hierarchy" in schema_data:
+                self.tag_hierarchy = schema_data["tag_hierarchy"]
+                self.tag_active_states = schema_data.get("tag_active_states", {})
+            elif "entity_tags" in schema_data:
+                self.tag_hierarchy = {"Imported Schema": schema_data["entity_tags"]}
+                self.tag_active_states = {t: True for t in schema_data["entity_tags"]}
+            else:
                 raise ValueError("File is not a valid schema file.")
-            self.entity_tags = schema_data["entity_tags"]
-            self.relation_types = schema_data["relation_types"]
+
+            self.relation_types = schema_data.get("relation_types", [])
+            self._sync_flat_tags() # FONTOS: Szinkronizáljuk a mester listát
+
             self._update_entity_tag_combobox()
             self._update_relation_type_combobox()
             self._ensure_default_colors()
@@ -1064,7 +1168,8 @@ class TextAnnotator:
             "version": SESSION_FILE_VERSION,
             "files_list": self.files_list,
             "current_file_index": self.current_file_index,
-            "entity_tags": self.entity_tags,
+            "tag_hierarchy": self.tag_hierarchy, # ÚJ
+            "tag_active_states": self.tag_active_states, # ÚJ
             "tag_propagation_states": self.tag_propagation_states,
             "selection_mode": self.selection_mode.get(),
             "relation_types": self.relation_types,
@@ -1120,8 +1225,19 @@ class TextAnnotator:
         try:
             self.files_list = session_data["files_list"]
             self.annotations = session_data["annotations"]
-            self.entity_tags = session_data["entity_tags"]
+
+            # Új hierarchikus rendszer betöltése vagy a régi migrációja
+            if "tag_hierarchy" in session_data:
+                self.tag_hierarchy = session_data["tag_hierarchy"]
+                self.tag_active_states = session_data.get("tag_active_states", {})
+            else:
+                # Régi típusú session fájl migrálása egy 'Custom Layer'-be
+                old_tags = session_data.get("entity_tags", [])
+                self.tag_hierarchy = {"Custom Layer": old_tags}
+                self.tag_active_states = {t: True for t in old_tags}
+
             loaded_states = session_data.get("tag_propagation_states", {})
+            self._sync_flat_tags() # Frissíti a master listát
             self.tag_propagation_states = {tag: loaded_states.get(tag, True) for tag in self.entity_tags}
             self.selection_mode.set(session_data.get("selection_mode", "word"))
             self.relation_types = session_data["relation_types"]
@@ -1343,7 +1459,13 @@ class TextAnnotator:
             new_tags = found_tags - set(self.entity_tags)
             if new_tags:
                 if messagebox.askyesno("New Tags Found", f"Found new tags: {', '.join(new_tags)}.\n\nAdd them to the session?"):
-                    self.entity_tags.extend(list(new_tags))
+                    if "Imported Tags" not in self.tag_hierarchy:
+                        self.tag_hierarchy["Imported Tags"] = []
+                    for t in new_tags:
+                        self.tag_hierarchy["Imported Tags"].append(t)
+                        self.tag_active_states[t] = True
+                        self.tag_propagation_states[t] = True
+                    self._sync_flat_tags() # Mester lista frissítése
                     self._update_entity_tag_combobox()
                     self._configure_text_tags()
                 else:
@@ -1490,6 +1612,7 @@ class TextAnnotator:
         return False
 
     def annotate_selection(self):
+        self.get_active_tags()
         if not self.current_file_path or not self.entity_tags: return
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL)
@@ -2134,14 +2257,18 @@ class TextAnnotator:
             msg = (f"The dictionary contains new tags that ANNIE did not know before:\n\n"
                    f"{', '.join(missing_tags)}\n\n"
                    f"Would you like the system to AUTOMATICALLY ADD these to the session?")
-            
+
             if messagebox.askyesno("Adding new tags", msg, parent=self.root):
-                # Új címkék regisztrálása
+                # VÁLTOZÁS ITT: Új címkék regisztrálása a hierarchiába
+                if "Dictionary Layer" not in self.tag_hierarchy:
+                    self.tag_hierarchy["Dictionary Layer"] = []
                 for t in missing_tags:
                     if t not in self.entity_tags:
-                        self.entity_tags.append(t)
+                        self.tag_hierarchy["Dictionary Layer"].append(t)
+                        self.tag_active_states[t] = True
                         self.tag_propagation_states[t] = True
-                
+
+                self._sync_flat_tags() # FONTOS!
                 # UI, színek és legördülő menük frissítése
                 self._update_entity_tag_combobox()
                 self._configure_text_tags()
@@ -2238,75 +2365,111 @@ class TextAnnotator:
 
     def manage_entity_tags(self):
         """
-        Window for managing entity members and propagation settings.
+        Window for managing hierarchical entity members, their active state (for hotkeys),
+        and their propagation settings.
         """
         window = tk.Toplevel(self.root)
-        window.title("Manage Entity Tags & Propagation")
-        window.geometry("550x450") # Kicsit szélesebb, hogy kényelmesen kiférjenek a gombok
+        window.title("Manage Layered Entity Tags")
+        window.geometry("600x550")
         window.transient(self.root)
         window.grab_set()
 
-        # --- List frame (Treeview) ---
         list_frame = tk.Frame(window)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
 
-        # Defining Treeview
-        columns = ("Tag", "Propagate")
-        tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
-        tree.heading("Tag", text="Entity Tag Name", anchor=tk.W)
-        tree.heading("Propagate", text="Auto-Propagate?", anchor=tk.CENTER)
-        tree.column("Tag", width=250, anchor=tk.W)
-        tree.column("Propagate", width=100, anchor=tk.CENTER)
+        # Hierarchical Treeview
+        columns = ("Active", "Propagate")
+        tree = ttk.Treeview(list_frame, columns=columns, selectmode="browse")
+        tree.heading("#0", text="Layer / Tag", anchor=tk.W)
+        tree.heading("Active", text="Active (Hotkeys)", anchor=tk.CENTER)
+        tree.heading("Propagate", text="Auto-Propagate", anchor=tk.CENTER)
+
+        tree.column("#0", width=300, anchor=tk.W)
+        tree.column("Active", width=120, anchor=tk.CENTER)
+        tree.column("Propagate", width=120, anchor=tk.CENTER)
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
-
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Loading data
-        def refresh_list():
+        def refresh_tree():
             tree.delete(*tree.get_children())
-            for tag in self.entity_tags:
-                # We ensure that there is an entry in dict
-                if tag not in self.tag_propagation_states:
-                    self.tag_propagation_states[tag] = True
+            hotkey_counter = 1
+            active_tags = self.get_active_tags()
 
-                prop_status = "✅" if self.tag_propagation_states[tag] else "❌"
-                # Color lookup for visual assistance
-                color = self.get_color_for_tag(tag)
+            for layer, tags in self.tag_hierarchy.items():
+                # Check if layer is partially/fully active or propagating
+                layer_active = any(self.tag_active_states.get(t, True) for t in tags)
+                layer_prop = any(self.tag_propagation_states.get(t, True) for t in tags)
 
-                iid = tree.insert("", tk.END, values=(tag, prop_status))
-                try: tree.tag_configure(iid, background=color)
-                except: pass
-                tree.item(iid, tags=(iid,))
-        refresh_list()
+                l_act = "✅ (Layer)" if layer_active else "❌ (Layer)"
+                l_prop = "✅ (Layer)" if layer_prop else "❌ (Layer)"
 
-        # --- Interakciók ---
-        def toggle_propagation(event):
-            selected_item = tree.selection()
-            if not selected_item: return
-            item_vals = tree.item(selected_item[0], "values")
-            tag_name = item_vals[0]
+                layer_iid = tree.insert("", tk.END, text=layer, values=(l_act, l_prop), open=True)
 
-            # Státusz megfordítása
-            current_state = self.tag_propagation_states.get(tag_name, True)
-            self.tag_propagation_states[tag_name] = not current_state
-            refresh_list()
-            # Kijelölés visszaállítása
-            for child in tree.get_children():
-                if tree.item(child, "values")[0] == tag_name:
-                    tree.selection_set(child)
-                    break
+                for tag in tags:
+                    is_active = self.tag_active_states.get(tag, True)
+                    is_prop = self.tag_propagation_states.get(tag, True)
 
-        # Dupla kattintásra vált
-        tree.bind("<Double-1>", toggle_propagation)
+                    # Display hotkey number if active
+                    act_display = "❌"
+                    if is_active:
+                        if hotkey_counter <= 10:
+                            num = hotkey_counter if hotkey_counter < 10 else 0
+                            act_display = f"✅ (Key: {num})"
+                            hotkey_counter += 1
+                        else:
+                            act_display = "✅ (No key)"
 
-        # --- Vezérlőgombok ---
+                    prop_display = "✅" if is_prop else "❌"
+
+                    tid = tree.insert(layer_iid, tk.END, text=tag, values=(act_display, prop_display))
+
+                    # Apply color background
+                    color = self.get_color_for_tag(tag)
+                    try: tree.tag_configure(tid, background=color)
+                    except: pass
+                    tree.item(tid, tags=(tid,))
+
+        refresh_tree()
+
+        # --- Interactions: Double-click to toggle ---
+        def on_tree_double_click(event):
+            item_id = tree.identify_row(event.y)
+            column = tree.identify_column(event.x)
+            if not item_id or column not in ('#1', '#2'): return
+
+            item_text = tree.item(item_id, 'text')
+            parent_id = tree.parent(item_id)
+            is_layer = (parent_id == '')
+
+            if column == '#1': # Toggle Active
+                if is_layer:
+                    # Toggle all children based on current layer state
+                    current_active = any(self.tag_active_states.get(t, True) for t in self.tag_hierarchy[item_text])
+                    for t in self.tag_hierarchy[item_text]:
+                        self.tag_active_states[t] = not current_active
+                else:
+                    self.tag_active_states[item_text] = not self.tag_active_states.get(item_text, True)
+
+            elif column == '#2': # Toggle Propagate
+                if is_layer:
+                    current_prop = any(self.tag_propagation_states.get(t, True) for t in self.tag_hierarchy[item_text])
+                    for t in self.tag_hierarchy[item_text]:
+                        self.tag_propagation_states[t] = not current_prop
+                else:
+                    self.tag_propagation_states[item_text] = not self.tag_propagation_states.get(item_text, True)
+
+            refresh_tree()
+            self._update_entity_tag_combobox() # Update combobox immediately
+
+        tree.bind("<Double-1>", on_tree_double_click)
+
+        # --- Controls Frame ---
         controls_frame = tk.Frame(window)
         controls_frame.pack(fill=tk.X, padx=10, pady=10)
 
-        # Hozzáadás mező
         add_frame = tk.Frame(controls_frame)
         add_frame.pack(fill=tk.X, pady=5)
         tk.Label(add_frame, text="New Tag:").pack(side=tk.LEFT)
@@ -2316,90 +2479,83 @@ class TextAnnotator:
 
         def add_tag():
             tag = new_tag_var.get().strip()
-            if tag and tag not in self.entity_tags:
-                self.entity_tags.append(tag)
-                self.tag_propagation_states[tag] = True # Default True
-                self.entity_tags.sort()
-                refresh_list()
-                new_tag_var.set("")
-            elif tag in self.entity_tags:
+            if not tag: return
+            if tag in self.entity_tags:
                 messagebox.showwarning("Duplicate", "Tag already exists!", parent=window)
+                return
 
-        btn_add = tk.Button(add_frame, text="Add", command=add_tag)
+            selected = tree.selection()
+            if selected:
+                item_id = selected[0]
+                parent_id = tree.parent(item_id)
+                target_layer = tree.item(item_id, 'text') if parent_id == '' else tree.item(parent_id, 'text')
+            else:
+                target_layer = list(self.tag_hierarchy.keys())[0] # Default to first layer
+
+            self.tag_hierarchy[target_layer].append(tag)
+            self.tag_active_states[tag] = True
+            self.tag_propagation_states[tag] = True
+            self._sync_flat_tags()
+            refresh_tree()
+            self._update_entity_tag_combobox()
+            new_tag_var.set("")
+
+        btn_add = tk.Button(add_frame, text="Add to Selected Layer", command=add_tag)
         btn_add.pack(side=tk.LEFT)
         entry.bind("<Return>", lambda e: add_tag())
 
-        # Törlés / Átnevezés / Mentés
         btn_frame = tk.Frame(controls_frame)
         btn_frame.pack(fill=tk.X, pady=5)
 
-        def remove_tag():
-            selected = tree.selection()
-            if not selected: return
-            tag_to_remove = tree.item(selected[0], "values")[0]
-            if messagebox.askyesno("Confirm", f"Delete tag '{tag_to_remove}'?"):
-                self.entity_tags.remove(tag_to_remove)
-                if tag_to_remove in self.tag_propagation_states:
-                    del self.tag_propagation_states[tag_to_remove]
-                refresh_list()
-
-        # --- ÚJ: ÁTNEVEZÉS FUNKCIÓ ---
         def rename_tag():
             selected = tree.selection()
-            if not selected:
-                messagebox.showinfo("Infó", "Kérlek válassz ki egy címkét az átnevezéshez!", parent=window)
+            if not selected: return
+            item_id = selected[0]
+            if tree.parent(item_id) == '':
+                messagebox.showinfo("Info", "Cannot rename entire layers yet, select a Tag.", parent=window)
                 return
 
-            old_tag = tree.item(selected[0], "values")[0]
-
+            old_tag = tree.item(item_id, 'text')
             from tkinter import simpledialog
-            new_tag = simpledialog.askstring("Címke átnevezése", f"Add meg az új nevet a(z) '{old_tag}' címkének:", initialvalue=old_tag, parent=window)
+            new_tag = simpledialog.askstring("Rename Tag", f"New name for '{old_tag}':", initialvalue=old_tag, parent=window)
 
             if not new_tag: return
             new_tag = new_tag.strip()
             if not new_tag or new_tag == old_tag: return
-
             if new_tag in self.entity_tags:
-                messagebox.showwarning("Hiba", f"A(z) '{new_tag}' címke már létezik. Válassz egyedi nevet!", parent=window)
+                messagebox.showwarning("Error", "Tag name already exists!", parent=window)
                 return
 
-            # 1. Frissítjük a globális címkelistát és a beállításokat
-            idx = self.entity_tags.index(old_tag)
-            self.entity_tags[idx] = new_tag
+            # Replace in hierarchy
+            parent_layer = tree.item(tree.parent(item_id), 'text')
+            idx = self.tag_hierarchy[parent_layer].index(old_tag)
+            self.tag_hierarchy[parent_layer][idx] = new_tag
 
-            if old_tag in self.tag_propagation_states:
-                self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag)
+            # Migrate states & colors
+            self.tag_active_states[new_tag] = self.tag_active_states.pop(old_tag, True)
+            self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag, True)
+            if old_tag in self.tag_colors: self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
+            self._sync_flat_tags()
 
-            # Megtartjuk az eredeti színt az új névhez
-            if old_tag in self.tag_colors:
-                self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
-
-            # 2. Végigmegyünk az összes annotáción a munkamenetben, és átírjuk a régi címkéket az újra
+            # Update annotations
             rename_count = 0
             for file_path, data in self.annotations.items():
                 for entity in data.get("entities", []):
                     if entity.get("tag") == old_tag:
                         entity["tag"] = new_tag
                         rename_count += 1
-
-            # 3. Frissítjük a belső gyorsítótárat az aktív fájlhoz, nehogy eltörjön a törlés/szerkesztés funkció
             if self.current_file_path:
                 self._build_entity_lookup_map(self.annotations.get(self.current_file_path, {}).get('entities', []))
 
-            messagebox.showinfo("Siker", f"Sikeresen átnevezve: '{old_tag}' -> '{new_tag}'.\n\nFrissítve lett {rename_count} darab annotáció a teljes munkamenetben.", parent=window)
-            refresh_list()
-
-        btn_remove = tk.Button(btn_frame, text="Remove Selected", command=remove_tag)
-        btn_remove.pack(side=tk.LEFT)
+            messagebox.showinfo("Success", f"Renamed to '{new_tag}'.\nUpdated {rename_count} annotations.", parent=window)
+            refresh_tree()
+            self._update_entity_tag_combobox()
 
         btn_rename = tk.Button(btn_frame, text="Rename Selected", command=rename_tag)
-        btn_rename.pack(side=tk.LEFT, padx=5)
-
-        tk.Label(btn_frame, text="(Double-click toggles Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
+        btn_rename.pack(side=tk.LEFT)
+        tk.Label(btn_frame, text="(Double-click columns to toggle Active/Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
 
         def save_and_close():
-            # Frissítjük a fő UI-t a bezáráskor
-            self._update_entity_tag_combobox()
             self._configure_text_tags()
             if self.current_file_path:
                 self.apply_annotations_to_text()
