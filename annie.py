@@ -1217,18 +1217,28 @@ class TextAnnotator:
         load_path = filedialog.askopenfilename(
             filetypes=[("ANNIE Session files", "*.json"), ("All files", "*.*")], parent=self.root)
         if not load_path: return
+        
         try:
             with open(load_path, 'r', encoding='utf-8') as f:
                 session_data = json.load(f)
         except Exception as e:
             messagebox.showerror("Load Session Error", f"Could not read session file:\n{e}", parent=self.root)
             return
-        required_keys = ["files_list", "annotations", "entity_tags", "relation_types"]
+            
+        # 1. Alapvető kulcsok ellenőrzése
+        required_keys = ["files_list", "annotations", "relation_types"]
         if not all(key in session_data for key in required_keys):
-            messagebox.showerror("Load Session Error", "Session file is missing required data.", parent=self.root)
+            messagebox.showerror("Load Session Error", "Session file is missing core required data.", parent=self.root)
             return
 
+        # 2. Címkék ellenőrzése (régi VAGY új struktúra)
+        if "entity_tags" not in session_data and "tag_hierarchy" not in session_data:
+            messagebox.showerror("Load Session Error", "Session file is missing tag definitions.", parent=self.root)
+            return
+
+        # 3. EZ A SOR HIÁNYZOTT: Hiányzó fájlok kigyűjtése
         missing_files = [fp for fp in session_data["files_list"] if not os.path.isfile(fp)]
+        
         if missing_files:
             msg = "Some text files could not be found:\n- " + "\n- ".join(os.path.basename(p) for p in missing_files[:5])
             if len(missing_files) > 5: msg += "\n..."
@@ -1239,7 +1249,7 @@ class TextAnnotator:
         try:
             self.files_list = session_data["files_list"]
             self.annotations = session_data["annotations"]
-
+            
             # Új hierarchikus rendszer betöltése vagy a régi migrációja
             if "tag_hierarchy" in session_data:
                 self.tag_hierarchy = session_data["tag_hierarchy"]
@@ -1249,10 +1259,11 @@ class TextAnnotator:
                 old_tags = session_data.get("entity_tags", [])
                 self.tag_hierarchy = {"Custom Layer": old_tags}
                 self.tag_active_states = {t: True for t in old_tags}
-
+                
             loaded_states = session_data.get("tag_propagation_states", {})
             self._sync_flat_tags() # Frissíti a master listát
             self.tag_propagation_states = {tag: loaded_states.get(tag, True) for tag in self.entity_tags}
+            
             self.selection_mode.set(session_data.get("selection_mode", "word"))
             self.relation_types = session_data["relation_types"]
             self.tag_colors = session_data.get("tag_colors", {})
@@ -1261,26 +1272,32 @@ class TextAnnotator:
             self.session_save_path = load_path
             self.last_used_ai_models = session_data.get("last_used_ai_models", [])
             self.current_ai_models = session_data.get("current_ai_models", [])
+            
             self.files_listbox.delete(0, tk.END)
             for file_path in self.files_list:
                 display_name = os.path.basename(file_path)
                 if file_path in missing_files: display_name += " [MISSING]"
                 self.files_listbox.insert(tk.END, display_name)
+                
             self._update_entity_tag_combobox()
             self._update_relation_type_combobox()
             self._ensure_default_colors()
             self._configure_text_tags()
             self._configure_treeview_tags()
+            
             idx_to_load = session_data.get("current_file_index", 0)
             if self.files_list and 0 <= idx_to_load < len(self.files_list) and self.files_list[idx_to_load] not in missing_files:
                 self.load_file(idx_to_load)
             else:
                 self.status_var.set("Session loaded. No files to display.")
+                
             base_dir_name = os.path.basename(os.path.dirname(self.files_list[0])) if self.files_list else "Session"
             self.root.title(f"ANNIE - {base_dir_name} [{os.path.basename(load_path)}]")
+            
         except Exception as e:
             messagebox.showerror("Load Session Error", f"Error applying session data:\n{e}", parent=self.root)
             self._reset_state()
+            traceback.print_exc()
         finally:
             self._update_button_states()
 
