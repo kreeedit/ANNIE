@@ -511,7 +511,11 @@ class TextAnnotator:
         try:
             if "propagated_entity" not in self.text_area.tag_names():
                 self.text_area.tag_configure("propagated_entity", underline=True)
-        except tk.TclError as e: print(f"Warning: Could not configure text tag 'propagated_entity': {e}")
+
+            if "low_confidence" not in self.text_area.tag_names():
+                self.text_area.tag_configure("low_confidence", borderwidth=2, relief=tk.SOLID)
+
+        except tk.TclError as e: print(f"Warning: Could not configure text tag: {e}")
         self.text_area.tag_configure("selection_highlight", borderwidth=2, relief=tk.SOLID)
 
     def _configure_treeview_tags(self):
@@ -840,7 +844,7 @@ class TextAnnotator:
         self.text_area.config(state=tk.NORMAL)
         try:
             self.text_area.delete(1.0, tk.END)
-            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "selection_highlight", tk.SEL}
+            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "selection_highlight", "low_confidence", tk.SEL}
             for tag in tags_to_clear:
                 try: self.text_area.tag_remove(tag, "1.0", tk.END)
                 except tk.TclError: pass
@@ -1662,7 +1666,7 @@ class TextAnnotator:
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL)
         try:
-            tags_to_clear = set(self.entity_tags) | {"propagated_entity"}
+            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "low_confidence"}
             for tag in tags_to_clear: self.text_area.tag_remove(tag, "1.0", tk.END)
 
             entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
@@ -1673,7 +1677,11 @@ class TextAnnotator:
                     tag = ann['tag']
                     if tag in self.entity_tags:
                         self.text_area.tag_add(tag, start_pos, end_pos)
-                        if ann.get('propagated'): self.text_area.tag_add("propagated_entity", start_pos, end_pos)
+
+                        if ann.get('score', 1.0) < 0.60:
+                            self.text_area.tag_add("low_confidence", start_pos, end_pos)
+                        elif ann.get('propagated'):
+                            self.text_area.tag_add("propagated_entity", start_pos, end_pos)
                 except Exception: pass
         finally:
             if self.text_area.winfo_exists(): self.text_area.config(state=original_state)
@@ -2263,12 +2271,14 @@ class TextAnnotator:
             self.update_entities_list()
             self._update_button_states()
 
-            self.status_var.set(f"Ensemble Complete. Added: {added_memory_count} (Memory) + {added_ai_count} (AI).")
+            # Pass the final success message through the queue to ensure UI update
+            self._update_status_threadsafe(f"DONE|Ensemble Complete. Added: {added_memory_count} (Memory) + {added_ai_count} (AI).")
         except Exception as e:
             traceback.print_exc()
-            self.status_var.set(f"Error applying annotations to UI: {e}")
+            self._update_status_threadsafe(f"DONE|Error applying annotations to UI: {e}")
         finally:
-            self._reset_ai_state()
+            # Ensure AI lock is lifted
+            self._is_annotating_ai = False
 
     def run_ai_annotation_from_hotkey(self, event=None):
         if self._is_annotating_ai: return
@@ -2416,11 +2426,17 @@ class TextAnnotator:
         try:
             while True:
                 message = self.ai_status_queue.get_nowait()
-                self.status_var.set(message)
-                if "Loading AI" in message or "elemzése" in message or "Predikció" in message or "1/2:" in message or "2/2:" in message:
-                    self.progress_bar.start()
-                else:
+
+                # Check for explicit DONE signal to stop progress bar
+                if message.startswith("DONE|"):
+                    self.status_var.set(message.split("|", 1)[1])
                     self.progress_bar.stop()
+                    try: self.settings_menu.entryconfig("Pre-annotate with Hybrid AI...", state="normal")
+                    except: pass
+                else:
+                    self.status_var.set(message)
+                    self.progress_bar.start()
+
                 self.root.update()
         except queue.Empty: pass
         self.root.after(100, self._process_queue)
@@ -2428,7 +2444,8 @@ class TextAnnotator:
     def _start_ai_annotation_process(self, model_names, label_mapping=None, min_conf=None, max_conf=None):
         if self._is_annotating_ai: return
         self._is_annotating_ai = True
-        self.settings_menu.entryconfig("Pre-annotate with Hybrid AI...", state="disabled")
+        try: self.settings_menu.entryconfig("Pre-annotate with Hybrid AI...", state="disabled")
+        except: pass
 
         full_text = self.text_area.get("1.0", tk.END)
 
@@ -2452,7 +2469,7 @@ class TextAnnotator:
             from transformers import pipeline, AutoTokenizer
             def thread_target():
                 try:
-                    self._update_status_threadsafe("1/2: Session Memory (Tudásbázis) elemzése...")
+                    self._update_status_threadsafe("1/2: Session Memory (Knowledge Base) processing...")
                     memory_anns = self._get_memory_predictions(full_text)
 
                     pipelines = []
@@ -2469,41 +2486,25 @@ class TextAnnotator:
                             ner_pipeline = pipeline("token-classification", model=model_name, tokenizer=tokenizer, aggregation_strategy="max", device="cpu")
                         pipelines.append(ner_pipeline)
 
-                    self._update_status_threadsafe("AI modellek betöltve. Szöveg annotálása...")
+                    self._update_status_threadsafe("AI models loaded. Annotating text...")
                     ai_anns = self._get_ai_predictions(full_text, pipelines, label_mapping, min_conf, max_conf)
 
                     self.root.after(0, self._apply_ensemble_to_ui, memory_anns, ai_anns)
 
                 except Exception as e:
-                    self._update_status_threadsafe(f"Hiba: {e}")
+                    self._update_status_threadsafe(f"DONE|Error: {e}")
                     traceback.print_exc()
-                    self.root.after(0, self._reset_ai_state)
 
             threading.Thread(target=thread_target, daemon=True).start()
 
         except Exception as e:
-            self._reset_ai_state()
-            messagebox.showerror("Hiba", f"Hiba az AI indításakor:\n{e}", parent=self.root)
-
-    def _reset_ai_state(self):
-        self._is_annotating_ai = False
-        try: self.settings_menu.entryconfig("Pre-annotate with Hybrid AI...", state="normal")
-        except: pass
-        self.progress_bar.stop()
+            self._update_status_threadsafe(f"DONE|Failed to start AI: {e}")
+            messagebox.showerror("Error", f"Failed to start AI:\n{e}", parent=self.root)
 
     def _get_ai_predictions(self, full_text, pipelines, label_mapping, min_conf, max_conf):
+        """Extracts AI predictions using a safer, word-based chunking approach to avoid token limits."""
         try:
             all_detected_entities = []
-            tokenizer = pipelines[0].tokenizer
-            max_length = getattr(tokenizer, 'model_max_length', 512)
-            stride = 128
-
-            def find_start_of_word(text, offset):
-                while offset > 0 and text[offset-1].isalnum(): offset -= 1
-                return offset
-            def find_end_of_word(text, offset):
-                while offset < len(text) and text[offset].isalnum(): offset += 1
-                return offset
 
             line_starts = [0]
             for i, char in enumerate(full_text):
@@ -2516,12 +2517,22 @@ class TextAnnotator:
                 char = offset - line_starts[line_idx]
                 return f"{line}.{char}"
 
+            def find_start_of_word(text, offset):
+                while offset > 0 and text[offset-1].isalnum(): offset -= 1
+                return offset
+
+            def find_end_of_word(text, offset):
+                while offset < len(text) and text[offset].isalnum(): offset += 1
+                return offset
+
             def process_entity_chunk(entity, start_offset_raw, end_offset_raw):
                 score = entity.get("score", 1.0)
                 if score < min_conf or score > max_conf: return None
+
                 raw_lbl = entity.get("entity_group", "") or entity.get("entity", "")
                 base_lbl = raw_lbl[2:] if raw_lbl.startswith(("B-", "I-")) else raw_lbl
                 tag = label_mapping.get(base_lbl)
+
                 if not tag: tag = label_mapping.get("*", "-- Ignore --")
                 if tag == "-- Ignore --" or tag not in self.entity_tags: return None
 
@@ -2530,9 +2541,11 @@ class TextAnnotator:
                 rstrip_len = len(entity_text_raw) - len(entity_text_raw.rstrip())
                 start_offset_clean = start_offset_raw + lstrip_len
                 end_offset_clean = end_offset_raw - rstrip_len
+
                 if self.extend_to_word.get():
                     start_offset_clean = find_start_of_word(full_text, start_offset_clean)
                     end_offset_clean = find_end_of_word(full_text, end_offset_clean)
+
                 final_word = full_text[start_offset_clean:end_offset_clean]
                 if not final_word.strip(): return None
 
@@ -2540,38 +2553,55 @@ class TextAnnotator:
                 end_pos = offset_to_tkinter(end_offset_clean)
                 start_l, start_c = map(int, start_pos.split("."))
                 end_l, end_c = map(int, end_pos.split("."))
+
                 return {"id": uuid.uuid4().hex, "start_line": start_l, "start_char": start_c,
-                        "end_line": end_l, "end_char": end_c, "text": final_word, "tag": tag, "propagated": True}
+                        "end_line": end_l, "end_char": end_c, "text": final_word, "tag": tag,
+                        "propagated": True, "score": float(score)}
 
-            if len(full_text) < max_length * 2:
-                for i, ner_pipeline in enumerate(pipelines):
-                    for entity in ner_pipeline(full_text):
-                        new_ann = process_entity_chunk(entity, entity['start'], entity['end'])
-                        if new_ann: all_detected_entities.append(new_ann)
-            else:
-                encoding = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False, truncation=False)
-                offsets = encoding['offset_mapping']
-                tokens = encoding['input_ids']
-                num_tokens = len(tokens)
-                num_chunks = -(-num_tokens // (max_length - stride)) if (max_length - stride) > 0 else 1
+            # Find word boundaries in the text to chunk safely without cutting words in half
+            word_spans = []
+            for match in re.finditer(r'\S+', full_text):
+                word_spans.append(match.span())
 
-                for j in range(0, num_tokens, max_length - stride):
-                    for i, ner_pipeline in enumerate(pipelines):
-                        start_token_idx = j
-                        end_token_idx = min(j + max_length, num_tokens)
-                        if start_token_idx >= end_token_idx: continue
-                        chunk_start_char = offsets[start_token_idx][0]
-                        chunk_end_char = offsets[end_token_idx - 1][1]
-                        chunk_text = full_text[chunk_start_char:chunk_end_char]
-                        if not chunk_text.strip(): continue
-                        for entity in ner_pipeline(chunk_text):
-                            new_ann = process_entity_chunk(entity, chunk_start_char + entity['start'], chunk_start_char + entity['end'])
+            chunk_size_words = 150 # Safe number of words to avoid 512 token limit
+            overlap_words = 40
+            chunks = []
+
+            i = 0
+            while i < len(word_spans):
+                chunk_spans = word_spans[i : i + chunk_size_words]
+                if not chunk_spans: break
+
+                chunk_start = chunk_spans[0][0]
+                chunk_end = chunk_spans[-1][1]
+
+                chunks.append((chunk_start, chunk_end, full_text[chunk_start:chunk_end]))
+
+                if i + chunk_size_words >= len(word_spans): break
+                i += (chunk_size_words - overlap_words)
+
+            for m_idx, ner_pipeline in enumerate(pipelines):
+                for c_idx, (chunk_start, chunk_end, chunk_text) in enumerate(chunks):
+                    self._update_status_threadsafe(f"Model {m_idx+1}/{len(pipelines)}: Annotating chunk {c_idx+1}/{len(chunks)}...")
+
+                    if not chunk_text.strip(): continue
+
+                    try:
+                        chunk_results = ner_pipeline(chunk_text)
+                        for entity in chunk_results:
+                            abs_start = chunk_start + entity['start']
+                            abs_end = chunk_start + entity['end']
+                            new_ann = process_entity_chunk(entity, abs_start, abs_end)
                             if new_ann: all_detected_entities.append(new_ann)
+
+                    except Exception as e:
+                        print(f"Warning on chunk {c_idx+1}: {e}")
 
             unique_annotations = {(ann['start_line'], ann['start_char'], ann['end_line'], ann['end_char'], ann['tag']): ann for ann in all_detected_entities}
             return list(unique_annotations.values())
+
         except Exception as e:
-            self._update_status_threadsafe(f"Hiba a predikció során: {e}")
+            print(f"Prediction logic error: {e}")
             traceback.print_exc()
             return []
 
