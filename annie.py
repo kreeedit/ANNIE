@@ -74,6 +74,11 @@ class TextAnnotator:
         self.last_used_ai_models = []
         self.current_ai_models = []
 
+        # --- AI Settings State ---
+        self.ai_min_conf = 0.90
+        self.ai_max_conf = 1.00
+        self.ai_label_mapping = {}
+
         # --- Sort Tracking ---
         self.entities_sort_column = None
         self.entities_sort_reverse = False
@@ -979,7 +984,10 @@ class TextAnnotator:
             "extend_to_word": self.extend_to_word.get(),
             "allow_multilabel_overlap": self.allow_multilabel_overlap.get(),
             "last_used_ai_models": self.last_used_ai_models,
-            "current_ai_models": self.current_ai_models
+            "current_ai_models": self.current_ai_models,
+            "ai_min_conf": self.ai_min_conf,
+            "ai_max_conf": self.ai_max_conf,
+            "ai_label_mapping": self.ai_label_mapping
         }
         try:
             with open(save_path, 'w', encoding='utf-8') as f: json.dump(session_data, f, indent=2, ensure_ascii=False)
@@ -1047,6 +1055,10 @@ class TextAnnotator:
             self.session_save_path = load_path
             self.last_used_ai_models = session_data.get("last_used_ai_models", [])
             self.current_ai_models = session_data.get("current_ai_models", [])
+
+            self.ai_min_conf = session_data.get("ai_min_conf", 0.60)
+            self.ai_max_conf = session_data.get("ai_max_conf", 1.00)
+            self.ai_label_mapping = session_data.get("ai_label_mapping", {})
 
             self.files_listbox.delete(0, tk.END)
             for file_path in self.files_list:
@@ -2325,11 +2337,13 @@ class TextAnnotator:
         tk.Label(main_frame, text="2. Confidence Score Band:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
         conf_frame = tk.Frame(main_frame)
         conf_frame.pack(fill=tk.X)
+
         tk.Label(conf_frame, text="Min:").pack(side=tk.LEFT)
-        min_conf_var = tk.DoubleVar(value=0.60)
+        min_conf_var = tk.DoubleVar(value=self.ai_min_conf)
         tk.Scale(conf_frame, variable=min_conf_var, from_=0.0, to=1.0, resolution=0.01, orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
         tk.Label(conf_frame, text="Max:").pack(side=tk.LEFT)
-        max_conf_var = tk.DoubleVar(value=1.00)
+        max_conf_var = tk.DoubleVar(value=self.ai_max_conf)
         tk.Scale(conf_frame, variable=max_conf_var, from_=0.0, to=1.0, resolution=0.01, orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         tk.Label(main_frame, text="3. Map AI Labels to Your Tags:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(15, 5))
@@ -2345,10 +2359,16 @@ class TextAnnotator:
             row.pack(fill=tk.X, pady=2)
             tk.Label(row, text=f"AI '{ai_lbl}' ➔ ", width=18, anchor=tk.E).pack(side=tk.LEFT)
             var = tk.StringVar()
-            guessed = "-- Ignore --"
-            if ai_lbl in active_tags: guessed = ai_lbl
-            elif ai_lbl == "ORG" and "INS" in active_tags: guessed = "INS"
-            elif ai_lbl == "DATE" and "DAT" in active_tags: guessed = "DAT"
+
+            if ai_lbl in self.ai_label_mapping:
+                guessed = self.ai_label_mapping[ai_lbl]
+                if guessed not in active_tags: guessed = "-- Ignore --"
+            else:
+                guessed = "-- Ignore --"
+                if ai_lbl in active_tags: guessed = ai_lbl
+                elif ai_lbl == "ORG" and "INS" in active_tags: guessed = "INS"
+                elif ai_lbl == "DATE" and "DAT" in active_tags: guessed = "DAT"
+
             var.set(guessed)
             mapping_vars[ai_lbl] = var
             ttk.Combobox(row, textvariable=var, values=active_tags, state="readonly", width=20).pack(side=tk.LEFT, padx=5)
@@ -2356,18 +2376,25 @@ class TextAnnotator:
         row_other = tk.Frame(mapping_frame)
         row_other.pack(fill=tk.X, pady=2)
         tk.Label(row_other, text="Any Other ➔ ", width=18, anchor=tk.E).pack(side=tk.LEFT)
-        var_other = tk.StringVar(value="-- Ignore --")
+
+        saved_other = self.ai_label_mapping.get("*", "-- Ignore --")
+        if saved_other not in active_tags: saved_other = "-- Ignore --"
+        var_other = tk.StringVar(value=saved_other)
+
         mapping_vars["*"] = var_other
         ttk.Combobox(row_other, textvariable=var_other, values=active_tags, state="readonly", width=20).pack(side=tk.LEFT, padx=5)
 
         def on_start_annotate():
             model_names = list(self.selected_models_listbox.get(0, tk.END))
             if not model_names: return
-            min_val, max_val = min_conf_var.get(), max_conf_var.get()
-            final_mapping = {ai_lbl: var.get() for ai_lbl, var in mapping_vars.items()}
+
+            self.ai_min_conf = min_conf_var.get()
+            self.ai_max_conf = max_conf_var.get()
+            self.ai_label_mapping = {ai_lbl: var.get() for ai_lbl, var in mapping_vars.items()}
+
             dialog.destroy()
             self._set_ai_models(model_names)
-            self._start_ai_annotation_process(model_names, final_mapping, min_val, max_val)
+            self._start_ai_annotation_process(model_names, self.ai_label_mapping, self.ai_min_conf, self.ai_max_conf)
 
         btn_frame = tk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=(20, 0), side=tk.BOTTOM)
@@ -2398,22 +2425,28 @@ class TextAnnotator:
         except queue.Empty: pass
         self.root.after(100, self._process_queue)
 
-    def _start_ai_annotation_process(self, model_names, label_mapping=None, min_conf=0.0, max_conf=1.0):
+    def _start_ai_annotation_process(self, model_names, label_mapping=None, min_conf=None, max_conf=None):
         if self._is_annotating_ai: return
         self._is_annotating_ai = True
         self.settings_menu.entryconfig("Pre-annotate with Hybrid AI...", state="disabled")
 
         full_text = self.text_area.get("1.0", tk.END)
 
+        if min_conf is None: min_conf = self.ai_min_conf
+        if max_conf is None: max_conf = self.ai_max_conf
+
         if label_mapping is None:
-            active = self.get_active_tags()
-            label_mapping = {
-                "PER": "PER" if "PER" in active else "-- Ignore --",
-                "ORG": "INS" if "INS" in active else ("ORG" if "ORG" in active else "-- Ignore --"),
-                "LOC": "LOC" if "LOC" in active else "-- Ignore --",
-                "DATE": "DAT" if "DAT" in active else ("DATE" if "DATE" in active else "-- Ignore --"),
-                "*": "-- Ignore --"
-            }
+            if self.ai_label_mapping:
+                label_mapping = self.ai_label_mapping
+            else:
+                active = self.get_active_tags()
+                label_mapping = {
+                    "PER": "PER" if "PER" in active else "-- Ignore --",
+                    "ORG": "INS" if "INS" in active else ("ORG" if "ORG" in active else "-- Ignore --"),
+                    "LOC": "LOC" if "LOC" in active else "-- Ignore --",
+                    "DATE": "DAT" if "DAT" in active else ("DATE" if "DATE" in active else "-- Ignore --"),
+                    "*": "-- Ignore --"
+                }
 
         try:
             from transformers import pipeline, AutoTokenizer
