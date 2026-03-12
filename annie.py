@@ -2861,10 +2861,29 @@ class TextAnnotator:
 
     def _build_few_shot_prompt(self, current_text):
         active_tags = self.get_active_tags()
-        prompt = (f"You are an expert medieval archivist performing Named Entity Recognition (NER). "
-                  f"Extract entities strictly belonging to these tags: {', '.join(active_tags)}.\n"
-                  f"Return ONLY a valid JSON array of objects with 'text' and 'tag' keys. Do not write markdown, explanations, or introductory text. Just the JSON array starting with [ and ending with ].\n\n")
 
+        tag_definitions = []
+        for tag_id in active_tags:
+            desc = ""
+            for cat in self.tag_categories:
+                if tag_id in cat.tags:
+                    desc = cat.tags[tag_id].get('description', 'No description provided.')
+                    break
+            tag_definitions.append(f"- {tag_id}: {desc}")
+
+        tags_block = "\n".join(tag_definitions)
+
+        prompt = (
+            f"You are a professional medievalist and NER expert. Your task is to identify entities in Latin/medieval texts.\n\n"
+            f"ALLOWED TAGS AND THEIR DEFINITIONS:\n{tags_block}\n\n"
+            f"STRICT RULES:\n"
+            f"1. Use ONLY the tags listed above. NEVER invent new tags.\n"
+            f"2. Every extracted 'text' must be a verbatim substring from the Input.\n"
+            f"3. Return the result as a MINIFIED JSON array of objects: [{{ \"text\": \"...\", \"tag\": \"...\" }}].\n"
+            f"4. No explanations, no markdown, no preamble. Just the JSON.\n\n"
+        )
+
+        # 3. Few-shot examples
         if self.llm_few_shot_count > 0:
             sorted_files = sorted(self.annotations.items(), key=lambda x: len(x[1].get('entities', [])), reverse=True)
             examples_added = 0
@@ -2874,16 +2893,16 @@ class TextAnnotator:
                 if not entities: continue
                 try:
                     with open(fp, 'r', encoding='utf-8') as f: ex_text = f.read()
-                except Exception: continue
+                except: continue
 
                 json_entities = [{"text": e["text"], "tag": e["tag"]} for e in entities if e["tag"] in active_tags]
                 if not json_entities: continue
 
-                prompt += f"### Example {examples_added + 1}\nInput:\n{ex_text}\nOutput:\n{json.dumps(json_entities, ensure_ascii=False)}\n\n"
+                prompt += f"### Example {examples_added + 1}\nInput: {ex_text[:600]}...\nOutput: {json.dumps(json_entities, ensure_ascii=False)}\n\n"
                 examples_added += 1
                 if examples_added >= self.llm_few_shot_count: break
 
-        prompt += f"### Target Task\nInput:\n{current_text}\nOutput:\n"
+        prompt += f"### Target Task\nInput: {current_text}\nOutput:"
         return prompt
 
     def _start_llm_agent(self):
