@@ -1015,6 +1015,7 @@ class TextAnnotator:
         if not save_path:
             self.status_var.set("Save session cancelled.")
             return
+
         session_data = {
             "version": SESSION_FILE_VERSION,
             "files_list": self.files_list,
@@ -1036,11 +1037,13 @@ class TextAnnotator:
             "llm_provider": self.llm_provider,
             "llm_models": self.llm_models,
             "llm_model": self.llm_model,
-            "llm_api_key": self.llm_api_key,
+            "hf_api_key": self.hf_api_key,           # JAVÍTVA: llm_api_key helyett
+            "claude_api_key": self.claude_api_key,   # JAVÍTVA: hozzáadva
             "openai_api_key": self.openai_api_key,
             "together_api_key": self.together_api_key,
             "llm_few_shot_count": self.llm_few_shot_count
         }
+
         try:
             with open(save_path, 'w', encoding='utf-8') as f: json.dump(session_data, f, indent=2, ensure_ascii=False)
             self.session_save_path = save_path
