@@ -149,6 +149,64 @@ class TextAnnotator:
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.bind('<Control-f>', self.find_text_dialog)
 
+
+    def _normalize_and_remap(self, text, spans):
+        """
+        Normalizálja a szöveget (minden whitespace -> egy szóköz),
+        és újraszámolja az annotációs offseteket a normalizált szövegre.
+        A vezető/záró szóközök okozta index-elcsúszást is kompenzálja.
+        """
+        mapping = {}
+        new_text = []
+        new_pos = 0
+        i = 0
+
+        while i < len(text):
+            if text[i].isspace():
+                mapping[i] = new_pos
+                j = i + 1
+                while j < len(text) and text[j].isspace():
+                    mapping[j] = new_pos
+                    j += 1
+                new_text.append(' ')
+                new_pos += 1
+                i = j
+            else:
+                mapping[i] = new_pos
+                new_text.append(text[i])
+                new_pos += 1
+                i += 1
+
+        mapping[len(text)] = new_pos
+        raw_normalized = ''.join(new_text)
+
+        # Kiszámoljuk, mennyit tolódik a szöveg a baloldali strip() miatt
+        lstrip_len = len(raw_normalized) - len(raw_normalized.lstrip())
+        normalized = raw_normalized.strip()
+
+        remapped = []
+        for span in spans:
+            new_start = mapping.get(span["start"])
+            new_end = mapping.get(span["end"])
+
+            if new_start is not None and new_end is not None:
+                # Kompenzáljuk a strip() miatti elcsúszást
+                new_start -= lstrip_len
+                new_end -= lstrip_len
+
+                # Biztosítjuk, hogy a span határok a stringen belül maradjanak
+                new_start = max(0, new_start)
+                new_end = min(len(normalized), new_end)
+
+                if new_start < new_end:
+                    remapped.append({
+                        "start": new_start,
+                        "end": new_end,
+                        "label": span["label"] # Vagy span["tag"], attól függően, mit kapott a metódus
+                    })
+
+        return normalized, remapped
+
     def _sync_flat_tags(self):
         """Synchronizes the flat entity_tags list with the current hierarchy."""
         self.entity_tags = [tag for tags in self.tag_hierarchy.values() for tag in tags]
@@ -1212,40 +1270,68 @@ class TextAnnotator:
         with open(save_path, 'w', encoding='utf-8') as f:
             for file_path, data in self.annotations.items():
                 if not data.get("entities"): continue
+
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as text_file: content = text_file.read()
-                except Exception: continue
-                spans = []
+                    with open(file_path, 'r', encoding='utf-8') as text_file:
+                        content = text_file.read()
+                except Exception:
+                    continue
+
+                raw_spans = []
                 sorted_entities = sorted(data['entities'], key=lambda x: (x['start_line'], x['start_char']))
+
                 for ann in sorted_entities:
                     start_char = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
                     end_char = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
-                    spans.append({"start": start_char, "end": end_char, "label": ann['tag']})
-                spacy_doc = {"text": content, "spans": spans}
+                    raw_spans.append({"start": start_char, "end": end_char, "label": ann['tag']})
+
+                normalized_text, remapped_spans = self._normalize_and_remap(content, raw_spans)
+
+                spacy_doc = {"text": normalized_text, "spans": remapped_spans}
                 f.write(json.dumps(spacy_doc, ensure_ascii=False) + '\n')
 
     def _export_as_conll(self, save_path):
         with open(save_path, 'w', encoding='utf-8') as f:
             for file_path, data in self.annotations.items():
                 if not data.get("entities"): continue
+
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as text_file: content = text_file.read()
-                except Exception: continue
-                tokens = [(m.group(0), m.start()) for m in re.finditer(r'\w+|[^\w\s]', content)]
-                tags = ["O"] * len(tokens)
+                    with open(file_path, 'r', encoding='utf-8') as text_file:
+                        content = text_file.read()
+                except Exception:
+                    continue
+
+                raw_spans = []
                 sorted_entities = sorted(data['entities'], key=lambda x: (x['start_line'], x['start_char']))
-                for entity in sorted_entities:
-                    start_char_abs = self._tkinter_index_to_char_offset(content, entity['start_line'], entity['start_char'])
-                    end_char_abs = self._tkinter_index_to_char_offset(content, entity['end_line'], entity['end_char'])
+
+                for ann in sorted_entities:
+                    start_char = self._tkinter_index_to_char_offset(content, ann['start_line'], ann['start_char'])
+                    end_char = self._tkinter_index_to_char_offset(content, ann['end_line'], ann['end_char'])
+                    raw_spans.append({"start": start_char, "end": end_char, "label": ann['tag']})
+
+                normalized_text, remapped_spans = self._normalize_and_remap(content, raw_spans)
+
+                tokens = [(m.group(0), m.start()) for m in re.finditer(r'\w+|[^\w\s]', normalized_text)]
+                tags = ["O"] * len(tokens)
+
+                for span in remapped_spans:
+                    start_char_abs = span['start']
+                    end_char_abs = span['end']
+                    tag_name = span['label']
+
                     is_first_token = True
                     for i, (token_text, token_start) in enumerate(tokens):
                         token_end = token_start + len(token_text)
+
                         if token_start >= start_char_abs and token_end <= end_char_abs:
                             if is_first_token:
-                                tags[i] = f"B-{entity['tag']}"
+                                tags[i] = f"B-{tag_name}"
                                 is_first_token = False
-                            else: tags[i] = f"I-{entity['tag']}"
-                for i, (token_text, _) in enumerate(tokens): f.write(f"{token_text} {tags[i]}\n")
+                            else:
+                                tags[i] = f"I-{tag_name}"
+
+                for i, (token_text, _) in enumerate(tokens):
+                    f.write(f"{token_text} {tags[i]}\n")
                 f.write("\n")
 
     def _ask_for_save_directory(self, initial_dir):
