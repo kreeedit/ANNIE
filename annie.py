@@ -2509,9 +2509,35 @@ class TextAnnotator:
 
         tk.Label(main_frame, text="3. Map AI Labels to Your Tags:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(15, 5))
 
-        mapping_frame = tk.Frame(main_frame)
-        mapping_frame.pack(fill=tk.X)
-        standard_ai_labels = ["PER", "ORG", "LOC", "MISC", "DATE"]
+        mapping_outer_frame = tk.Frame(main_frame)
+        mapping_outer_frame.pack(fill=tk.BOTH, expand=True) # expand=True engedi, hogy kitöltse a helyet
+
+        mapping_canvas = tk.Canvas(mapping_outer_frame, highlightthickness=0)
+        mapping_scrollbar = ttk.Scrollbar(mapping_outer_frame, orient=tk.VERTICAL, command=mapping_canvas.yview)
+        mapping_frame = tk.Frame(mapping_canvas)
+
+        mapping_frame.bind(
+            "<Configure>",
+            lambda e: mapping_canvas.configure(scrollregion=mapping_canvas.bbox("all"))
+        )
+
+        mapping_canvas.create_window((0, 0), window=mapping_frame, anchor="nw")
+        mapping_canvas.configure(yscrollcommand=mapping_scrollbar.set)
+
+        mapping_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        mapping_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _on_mousewheel(event):
+            mapping_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        mapping_canvas.bind('<Enter>', lambda e: mapping_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        mapping_canvas.bind('<Leave>', lambda e: mapping_canvas.unbind_all("<MouseWheel>"))
+        # ----------------------------------------
+
+        standard_ai_labels = [
+            "PER", "ACTOR", "TITLE", "REL", "LOC", "INS", "NAT", "EST",
+            "PROP", "LEG", "TRANS", "TIM", "DAT", "MON", "TAX", "COM",
+            "NUM", "MEA", "RELIC"
+        ]
         mapping_vars = {}
         active_tags = ["-- Ignore --"] + self.get_active_tags()
 
@@ -2608,13 +2634,14 @@ class TextAnnotator:
                 label_mapping = self.ai_label_mapping
             else:
                 active = self.get_active_tags()
-                label_mapping = {
-                    "PER": "PER" if "PER" in active else "-- Ignore --",
-                    "ORG": "INS" if "INS" in active else ("ORG" if "ORG" in active else "-- Ignore --"),
-                    "LOC": "LOC" if "LOC" in active else "-- Ignore --",
-                    "DATE": "DAT" if "DAT" in active else ("DATE" if "DATE" in active else "-- Ignore --"),
-                    "*": "-- Ignore --"
-                }
+                # Automatikusan 1:1-ben megfelelteti a HF címkéket a program címkéinek, ha aktívak
+                standard_hf_labels = [
+                    "PER", "ACTOR", "TITLE", "REL", "LOC", "INS", "NAT", "EST",
+                    "PROP", "LEG", "TRANS", "TIM", "DAT", "MON", "TAX", "COM",
+                    "NUM", "MEA", "RELIC"
+                ]
+                label_mapping = {tag: tag if tag in active else "-- Ignore --" for tag in standard_hf_labels}
+                label_mapping["*"] = "-- Ignore --"
 
         try:
             from transformers import pipeline, AutoTokenizer
