@@ -43,8 +43,9 @@ ANNIE goes beyond manual annotation by integrating **Hybrid Ensemble AI** (combi
     ```
 
 <p align="center"\>
-<img src="annie\_app.png" width="800" /\>
+<img src="annie_app.png" width="800" /\>
 </p\>
+
 
 ## Basic Usage
 
