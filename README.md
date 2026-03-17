@@ -6,9 +6,9 @@ ANNIE is a lightweight, robust, Python-based desktop application designed for an
 
 ANNIE goes beyond manual annotation by integrating **Hybrid Ensemble AI** (combining Hugging Face models with local Session Memory) and a **Generative LLM Agent** powered by a native **RAG (Retrieval-Augmented Generation)** engine for highly accurate, context-aware pre-annotations.
 
-\<p align="center"\>
-\<img src="annie.gif" width="400" /\>
-\</p\>
+<p align="center"\>
+<img src="annie.gif" width="400" /\>
+</p\>
 
 ## Features
 
@@ -42,9 +42,9 @@ ANNIE goes beyond manual annotation by integrating **Hybrid Ensemble AI** (combi
     python annie.py
     ```
 
-\<p align="center"\>
-\<img src="annie\_app.png" width="800" /\>
-\</p\>
+<p align="center"\>
+<img src="annie\_app.png" width="800" /\>
+</p\>
 
 ## Basic Usage
 
