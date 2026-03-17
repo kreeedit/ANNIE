@@ -2177,13 +2177,13 @@ class TextAnnotator:
 
         btn_frame_top = tk.Frame(dialog)
         btn_frame_top.pack(fill=tk.X, padx=20, pady=5)
-        tk.Button(btn_frame_top, text="Mind kijelöl", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        tk.Button(btn_frame_top, text="Kijelölés törlése", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        tk.Button(btn_frame_top, text="Select all", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(btn_frame_top, text="Delete selection", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
         def do_propagate():
             selected_indices = listbox.curselection()
             if not selected_indices:
-                messagebox.showwarning("Figyelem", "Nincs kiválasztva egyetlen fájl sem!", parent=dialog)
+                messagebox.showwarning("Attention!", "There is not any selection!", parent=dialog)
                 return
 
             selected_files = [self.files_list[i] for i in selected_indices]
