@@ -1,108 +1,100 @@
 # ANNIE - Annotation Interface for Named-entity & Information Extraction
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[](https://opensource.org/licenses/Apache-2.0)
 
-ANNIE is a lightweight, Python-based desktop application designed for annotating text files with named entities and directed relations. Built with Tkinter, it offers a user-friendly interface for researchers, linguists, and NLP practitioners to create high-quality annotated datasets for named entity recognition (NER) and relation extraction tasks.
+ANNIE is a lightweight, robust, Python-based desktop application designed for annotating text files with named entities and directed relations. Built with Tkinter, it offers a user-friendly interface for researchers, linguists, and NLP practitioners to create high-quality annotated datasets for named entity recognition (NER) and relation extraction tasks.
 
-<p align="center">
-  <img src="annie.gif" width="400" />
-</p>
+ANNIE goes beyond manual annotation by integrating **Hybrid Ensemble AI** (combining Hugging Face models with local Session Memory) and a **Generative LLM Agent** powered by a native **RAG (Retrieval-Augmented Generation)** engine for highly accurate, context-aware pre-annotations.
+
+\<p align="center"\>
+\<img src="annie.gif" width="400" /\>
+\</p\>
 
 ## Features
 
-- **Entity Annotation**: Tag text spans with customizable labels (e.g., Person, Organization, Location).
-- **Relation Annotation**: Define directed relations between entities (e.g., "spouse_of", "works_at").
-- **Batch Processing**: Load and annotate multiple `.txt` files from a directory.
-- **Entity Propagation**: Automatically annotate matching text spans across all files, with optional dictionary-based propagation.
-- **AI Pre-annotation**: Use a pre-trained NER model (requires `transformers` and `torch`) for automated entity tagging.
-- **Entity Merging/Demerging**: Merge multiple mentions of the same entity or separate them via right-click.
-- **Relation Flipping**: Reverse the direction of relations with a single click.
-- **Multi-label & Overlapping Annotations**: Optionally allow multiple tags or overlapping annotations.
-- **Session Management**: Save and load annotation sessions to resume work.
-- **Export/Import**: Support for CoNLL-2003 and spaCy JSONL formats for training data.
-- **Color-coded Visualization**: Highlight entities with tag-specific colors; propagated entities are underlined.
-- **Read-only Text Area**: Prevents accidental modifications.
-- **Hotkey Support**: Use keys 0-9 for quick tag selection/relabeling and `a` for AI pre-annotation.
-- **Flexible Schema**: Customize entity tags and relation types, with save/load functionality.
+  - **Hierarchical Entity Annotation**: Tag text spans using customizable layers (e.g., CORE, ANALYTICAL, SPAN). Dropdown menus are alphabetically sorted for readability, while hotkeys preserve your custom hierarchy.
+  - **Relation Annotation**: Define directed relations between entities (e.g., "spouse\_of", "works\_at").
+  - **Generative LLM Agent (RAG-powered)**: Connect to OpenAI, Anthropic (Claude), Together AI, or Hugging Face APIs. Uses a native TF-IDF-based Retrieval-Augmented Generation approach to find the most relevant human-annotated examples in your session for highly accurate Few-Shot prompting.
+  - **Hybrid AI Pre-annotation**: Run local/downloaded Hugging Face token-classification models ensembled with ANNIE's Session Memory to pre-annotate texts.
+  - **Secure API Key Management**: API keys are securely loaded and saved locally in a `.env` file, ensuring they are never accidentally shared via session files.
+  - **Selective Dictionary Export & Propagation**: Export specific tags to a TSV dictionary, and selectively propagate dictionary terms only to specifically chosen files in your corpus.
+  - **Global Search**: Press `Ctrl+F` to search for specific terms across the entire loaded session.
+  - **Sentence-level Conversion**: Automatically split your document-level session into sentence-level files (ideal for training standard NER models) with robust boundary detection.
+  - **Entity Merging/Demerging**: Merge multiple mentions of the same entity or separate them via right-click.
+  - **Session Management**: Save and load annotation sessions to resume work without losing progress.
+  - **Export/Import**: Support for CoNLL-2003 and spaCy JSONL formats.
 
 ## Getting Started
 
 ### Prerequisites
 
-- **Python**: 3.6 or higher.
-- **Required Libraries**: `tkinter` (included with Python), `json`, `os`, `shutil`, `pathlib`, `uuid`, `itertools`, `re`, `time`, `threading`.
-- **Optional Libraries**: `transformers` and `torch` for AI pre-annotation (`pip install transformers torch`).
+  - **Python**: 3.6 or higher.
+  - **Required Libraries**: `tkinter` (included with Python), `json`, `os`, `shutil`, `pathlib`, `uuid`, `itertools`, `re`, `time`, `threading`, `math`, `collections`. (No external dependencies for the core and RAG engine\!).
+  - **Optional Libraries**: `transformers` and `torch` for local Hybrid AI pre-annotation (`pip install transformers torch`), `requests` for Generative LLM APIs.
 
 ### Installation
 
-1. Clone this repository or download the source code.
-2. Navigate to the project directory.
-3. Run the application:
-   ```bash
-   python annie.py
-   ```
+1.  Clone this repository or download the source code.
+2.  Navigate to the project directory.
+3.  *(Optional but recommended)* Add `.env` to your `.gitignore` to keep your API keys secure.
+4.  Run the application:
+    ```bash
+    python annie.py
+    ```
 
-<p align="center">
-  <img src="annie_app.png" width="800" />
-</p>
+\<p align="center"\>
+\<img src="annie\_app.png" width="800" /\>
+\</p\>
 
 ## Basic Usage
 
-### 1. Loading Files
-1. Go to **File → Open Directory** and select a folder with `.txt` files.
-2. Files load in alphabetical order; the first file displays automatically.
-3. Use **Previous**/**Next** buttons or click a file in the listbox to navigate.
-4. Add files to the session via **File → Add File(s) to Session...**.
+### 1\. Loading Files
 
-### 2. Entity Annotation
-1. Drag to select text or double-click a word in the text area.
-2. Choose a tag from the Entity Tag dropdown or press 0-9 to select a tag.
-3. Click **Annotate Sel** to tag the selection.
-4. Entities appear in the Entities list and are highlighted with tag-specific colors.
-5. Single-click an annotated span to remove it, or select entities and click **Remove Sel**.
-6. Enable **Extend to word** to snap selections to word boundaries.
-7. Relabel entities by selecting them and pressing 0-9.
+1.  Go to **File → Open Directory** and select a folder with `.txt` files.
+2.  Files load in alphabetical order; the first file displays automatically.
+3.  Use **Previous**/**Next** buttons or click a file in the listbox to navigate.
 
-### 3. Relation Annotation
-1. Select exactly two entities in the Entities list (first = head, second = tail).
-2. Choose a relation type from the Relation Type dropdown.
-3. Click **Add Relation (Head→Tail)** to create the relation.
-4. Relations appear in the Relations list.
-5. Select a relation and click **Flip H/T** to reverse it or **Remove Relation** to delete it.
+### 2\. Entity Annotation
 
-### 4. Saving Annotations
-- Go to **File → Save Annotations** to export annotations as a JSON file.
-- Use **File → Save Session** to save the entire session (files, annotations, tags).
-- Load sessions via **File → Load Session...**.
+1.  Drag to select text or double-click a word in the text area.
+2.  Choose a tag from the alphabetically sorted Entity Tag dropdown, or press `0-9` to use your hierarchical hotkeys.
+3.  Click **Annotate Sel** to tag the selection.
+4.  Single-click an annotated span to remove it quickly.
+
+### 3\. Relation Annotation
+
+1.  Select exactly two entities in the Entities list (first = head, second = tail).
+2.  Choose a relation type from the Relation Type dropdown.
+3.  Click **Add Relation (Head→Tail)** to create the relation.
 
 ## Advanced Features
 
-### Managing Entity Tags and Relation Types
-- Use **Settings → Manage Entity Tags...** or **Manage Relation Types...** to add, remove, or edit tags/types.
-- Save/load schemas via **Settings → Save Tag/Relation Schema...** or **Load Tag/Relation Schema...**.
+### Generative LLM Agent & In-Context Learning
 
-### Entity Propagation
-- Click **Propagate Entities** to copy entities from the current file to all files.
-- Use **Settings → Load Dictionary & Propagate Entities...** to annotate from a dictionary file (format: `text tag`, e.g., `John Person`).
+  - Press `g` or go to **Settings → Generative LLM Agent (Few-Shot)...**.
+  - Select your provider (OpenAI, Claude, Together AI, HF) and enter your API key (saved securely to a local `.env` file).
+  - ANNIE uses a built-in **TF-IDF engine** to search your previously annotated files and injects the most mathematically similar documents into the prompt as Few-Shot examples, maximizing accuracy for repetitive/formulaic texts (e.g., historical or legal documents).
 
-### Entity Merging/Demerging
-- Select multiple entities and click **Merge Sel.** to assign them the same ID.
-- Right-click an annotated span and select **Demerge This Instance** to assign a new ID.
+### Hybrid AI & Pre-annotation
 
-### AI Pre-annotation
-- Press `a` or go to **Settings → Pre-annotate with AI...** to tag entities using a pre-trained NER model.
-- Requires `transformers` and `torch`. Annotations are marked as propagated (underlined).
+  - Press `a` or go to **Settings → Pre-annotate with Hybrid AI...** to tag entities using a pre-trained HF model combined with your current Session Memory.
 
-### Import/Export
-- Export annotations via **File → Export for Training...** in CoNLL or JSONL format.
-- Import annotations via **File → Import Annotations...** from CoNLL or JSONL files, creating new `.txt` files.
+### Selective Dictionary Export & Propagation
 
-### Multi-label Annotations
-- Enable **Settings → Allow Multi-label & Overlapping Annotations** to permit overlapping tags.
+  - **Export**: Go to **File → Export Dictionary...**, select the specific tags you want to export, and save them as a TSV file.
+  - **Propagate**: Go to **Settings → Load Dictionary & Propagate...**. After loading a dictionary, a dialog allows you to select *exactly which files* the propagation should be applied to, minimizing false positives in unrelated texts.
+
+### Convert Session to Sentence Mode
+
+  - Go to **File → Convert Session to Sentence Mode...** to automatically split your large document files into sentence-by-sentence `.txt` files while perfectly migrating all existing annotations and relations.
+
+### Global Search
+
+  - Press `Ctrl+F` to search for a word or phrase across the entire corpus. Double-click a search result to jump straight to that file and highlight the occurrence.
 
 ## Data Format
 
-Annotations are stored in JSON format:
+Annotations are stored in standard JSON format:
 
 ```json
 {
@@ -115,7 +107,7 @@ Annotations are stored in JSON format:
         "end_line": 1,
         "end_char": 20,
         "text": "John Smith",
-        "tag": "Person",
+        "tag": "PER",
         "propagated": false
       }
     ],
@@ -131,67 +123,43 @@ Annotations are stored in JSON format:
 }
 ```
 
-Session files include additional metadata:
-
-```json
-{
-  "version": "1.12",
-  "files_list": ["file1.txt", "file2.txt"],
-  "current_file_index": 0,
-  "entity_tags": ["Person", "Organization", ...],
-  "relation_types": ["spouse_of", "works_at", ...],
-  "tag_colors": {"Person": "#ffcccc", ...},
-  "annotations": {...},
-  "extend_to_word": true,
-  "allow_multilabel_overlap": true
-}
-```
+*Note: API Keys are exclusively stored in your local `.env` file and are **never** written to the session JSON file.*
 
 ## Tips & Tricks
 
-- **Hotkeys**: Use 0-9 to select/relabel tags, `a` for AI pre-annotation, and `Delete` to remove entities/relations.
-- **Navigation**: Click column headers to sort Entities/Relations lists; type a letter to jump to matching items.
-- **Workflow**: Annotate entities first, then relations; propagate entities early to save time.
-- **Dictionary Format**: Use one entity per line (e.g., `New York Location`).
-- **Double-click**: Selects a word for quick annotation.
-- **Read-only Text**: Ensures no accidental edits; use mouse or hotkeys for actions.
-
-## Troubleshooting
-
-- **AI Pre-annotation Fails**: Install `transformers` and `torch`; ensure a file is loaded.
-- **Missing Files**: Session loading warns about missing files; continue with available ones.
-- **Overlap Issues**: Enable multi-label support in Settings for overlapping annotations.
-- **Highlighting Issues**: Switch files to refresh the display.
-- **Export Errors**: Check write permissions and use `.conll` or `.jsonl` extensions.
+  - **Hotkeys**: Use `0-9` to select/relabel tags, `a` for Hybrid AI pre-annotation, `g` for the Generative LLM Agent, and `Delete` to remove entities.
+  - **Dictionary Format**: Use Tab-Separated Values (TSV) or Space-Separated values: `text \t tag` (e.g., `New York \t LOC`).
+  - **Read-only Text**: The text area is strictly immutable to ensure annotation offsets never break. Use the mouse or hotkeys for actions.
 
 ## Version History
 
-- **1.12** (2025):
-  - Added AI pre-annotation with `Babelscape/wikineural-multilingual-ner`.
-  - Implemented multi-label and overlapping annotation support.
-  - Added demerge functionality via right-click.
-  - Made text area read-only to prevent accidental edits.
-  - Improved propagation with whitespace handling and underlining for propagated entities.
-  - Enhanced double-click/highlight annotation and single-click removal.
-  - Added import/export for CoNLL and spaCy JSONL formats.
-- **0.75**: Double-click and highlight annotation, immutable text area.
-- **0.70**: Propagated entities flagged and underlined.
-- **0.65**: Entity search and sorting.
-- **0.60**: Session save/load for continuous work.
+  - **1.14** (2026):
+      - **Generative LLM Agent**: Added native RAG TF-IDF engine for context-aware Few-Shot prompting.
+      - **Security**: Moved API key storage entirely out of session files and into a local `.env` file.
+      - **UX Improvements**: Alphabetically sorted tag dropdowns; selective multi-file dictionary propagation; selective TSV dictionary export.
+      - **Global Search**: Added Ctrl+F functionality across the entire session.
+      - **Sentence Conversion**: Added robust document-to-sentence splitting.
+  - **1.12**:
+      - Added Hybrid AI pre-annotation.
+      - Implemented multi-label and overlapping annotation support.
+      - Added demerge functionality and CoNLL / spaCy JSONL export.
+  - **0.60 - 0.75**: Base features, read-only UI, session management, and visual flagging.
 
 ## Cite
 
 ### APA Style
-Kovács, T. (2025). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 1.12) [Computer software]. GitHub. https://github.com/kreeedit/ANNIE
+
+Kovács, T. (2026). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 1.14) [Computer software]. GitHub. [https://github.com/kreeedit/ANNIE](https://github.com/kreeedit/ANNIE)
 
 ### BibTeX
+
 ```bibtex
-@software{Kovacs_ANNIE_2025,
+@software{Kovacs_ANNIE_2026,
   author = {Kovács, Tamás},
   title = {{ANNIE: Annotation Interface for Named-entity & Information Extraction}},
-  version = {1.12},
+  version = {1.14},
   publisher = {Zenodo},
-  year = {2025},
+  year = {2026},
   doi = {10.5281/zenodo.15805548},
   url = {https://github.com/kreeedit/ANNIE}
 }
