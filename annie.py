@@ -90,10 +90,7 @@ class TextAnnotator:
         }
         self.llm_model = self.llm_models[self.llm_provider]
 
-        self.hf_api_key = ""
-        self.claude_api_key = ""
-        self.openai_api_key = ""
-        self.together_api_key = ""
+        self._load_api_keys()
         self.llm_few_shot_count = 3
 
         # --- Sort Tracking ---
@@ -976,6 +973,63 @@ class TextAnnotator:
         self.last_used_ai_models = []
         self.current_ai_models = []
 
+    def _load_api_keys(self):
+        """Betölti az API kulcsokat a lokális .env fájlból."""
+        self.hf_api_key = ""
+        self.claude_api_key = ""
+        self.openai_api_key = ""
+        self.together_api_key = ""
+
+        env_path = Path(".env")
+        if env_path.exists():
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"): continue
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        key, val = key.strip(), val.strip()
+                        if key == "HF_API_KEY": self.hf_api_key = val
+                        elif key == "CLAUDE_API_KEY": self.claude_api_key = val
+                        elif key == "OPENAI_API_KEY": self.openai_api_key = val
+                        elif key == "TOGETHER_API_KEY": self.together_api_key = val
+
+    def _save_api_keys(self):
+        env_path = Path(".env")
+        existing_lines = []
+        if env_path.exists():
+            with open(env_path, "r", encoding="utf-8") as f:
+                existing_lines = f.readlines()
+
+        keys_to_save = {
+            "HF_API_KEY": self.hf_api_key,
+            "CLAUDE_API_KEY": self.claude_api_key,
+            "OPENAI_API_KEY": self.openai_api_key,
+            "TOGETHER_API_KEY": self.together_api_key
+        }
+
+        new_lines = []
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k, _ = stripped.split("=", 1)
+                k = k.strip()
+                if k in keys_to_save:
+                    if keys_to_save[k]:
+                        new_lines.append(f"{k}={keys_to_save[k]}\n")
+                    del keys_to_save[k]
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+        for k, v in keys_to_save.items():
+            if v:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
     def _build_entity_lookup_map(self, entities):
         self._entity_lookup_map.clear()
         for entity in entities:
@@ -1099,10 +1153,6 @@ class TextAnnotator:
             "llm_provider": self.llm_provider,
             "llm_models": self.llm_models,
             "llm_model": self.llm_model,
-            "hf_api_key": self.hf_api_key,           # JAVÍTVA: llm_api_key helyett
-            "claude_api_key": self.claude_api_key,   # JAVÍTVA: hozzáadva
-            "openai_api_key": self.openai_api_key,
-            "together_api_key": self.together_api_key,
             "llm_few_shot_count": self.llm_few_shot_count
         }
 
@@ -2916,16 +2966,13 @@ class TextAnnotator:
         model_var = tk.StringVar(value=self.llm_model)
         api_key_var = tk.StringVar()
 
-        # Kezdeti kulcs beállítása anélkül, hogy a trace felülírná a modellt
         if self.llm_provider == "Anthropic (Claude)": api_key_var.set(self.claude_api_key)
         elif self.llm_provider == "OpenAI": api_key_var.set(self.openai_api_key)
         elif self.llm_provider == "Together AI": api_key_var.set(self.together_api_key)
         else: api_key_var.set(self.hf_api_key)
 
-        # --- VÁLTOZÁS: Intelligens memória UI váltáskor ---
         def on_provider_change(*args):
             p = provider_var.get()
-            # Betöltjük a szolgáltatóhoz korábban megjegyzett modellt
             model_var.set(self.llm_models.get(p, ""))
 
             if p == "Anthropic (Claude)": api_key_var.set(self.claude_api_key)
@@ -2956,7 +3003,6 @@ class TextAnnotator:
         def on_run():
             self.llm_provider = provider_var.get()
             self.llm_model = model_var.get().strip()
-            # MENTJÜK A BEÍRT MODELLT A SZÓTÁRBA:
             self.llm_models[self.llm_provider] = self.llm_model
             self.llm_few_shot_count = examples_var.get()
 
@@ -2969,6 +3015,8 @@ class TextAnnotator:
             if not entered_key:
                 messagebox.showerror("Error", "Please provide an API Key for the selected provider.", parent=dialog)
                 return
+
+            self._save_api_keys()
 
             dialog.destroy()
             self._start_llm_agent()
