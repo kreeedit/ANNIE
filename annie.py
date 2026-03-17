@@ -2148,15 +2148,64 @@ class TextAnnotator:
                 dictionary_mapping = {k: v for k, v in dictionary_mapping.items() if v not in missing_tags}
 
         if not dictionary_mapping: return
-        if not messagebox.askyesno("Confirm Propagation", f"Propagate {len(dictionary_mapping)} entities from dictionary?", parent=self.root): return
-        self._perform_propagation(dictionary_mapping, "Dictionary Propagation")
+        self._show_dictionary_propagation_dialog(dictionary_mapping)
 
-    def _perform_propagation(self, text_to_tag_map, source_description):
+    def _show_dictionary_propagation_dialog(self, dictionary_mapping):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Target files of propagation")
+        dialog.geometry("450x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(dialog, text=f"The dictionary contains {len(dictionary_mapping)} entities.\nSelect which files to search:", font=('TkDefaultFont', 10, 'bold'), justify=tk.LEFT).pack(pady=(10, 5), padx=20, anchor=tk.W)
+
+        list_frame = tk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for file_path in self.files_list:
+            display_name = os.path.basename(file_path)
+            listbox.insert(tk.END, display_name)
+
+        listbox.select_set(0, tk.END)
+
+        btn_frame_top = tk.Frame(dialog)
+        btn_frame_top.pack(fill=tk.X, padx=20, pady=5)
+        tk.Button(btn_frame_top, text="Mind kijelöl", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(btn_frame_top, text="Kijelölés törlése", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        def do_propagate():
+            selected_indices = listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("Figyelem", "Nincs kiválasztva egyetlen fájl sem!", parent=dialog)
+                return
+
+            selected_files = [self.files_list[i] for i in selected_indices]
+            dialog.destroy()
+
+            self._perform_propagation(dictionary_mapping, "Dictionary Propagation", target_files=selected_files)
+
+        btn_frame_bottom = tk.Frame(dialog)
+        btn_frame_bottom.pack(fill=tk.X, padx=20, pady=(10, 20))
+        tk.Button(btn_frame_bottom, text="Futtatás (Propagate)", command=do_propagate, bg="lightblue", width=16).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(btn_frame_bottom, text="Mégse", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
+
+    def _perform_propagation(self, text_to_tag_map, source_description, target_files=None):
+        if target_files is None:
+            target_files = self.files_list
+
         propagated_count, affected_files = 0, set()
         allow_overlap = True if "Dictionary" in source_description else self.allow_multilabel_overlap.get()
         self.status_var.set(f"Starting {source_description}..."); self.root.update()
         file_contents = {}
-        for file_path in self.files_list:
+
+        for file_path in target_files:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f: file_contents[file_path] = f.read()
             except Exception: continue
