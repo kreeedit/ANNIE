@@ -286,6 +286,7 @@ class TextAnnotator:
         file_menu.add_separator()
         file_menu.add_command(label="Import Annotations...", command=self.import_annotations)
         file_menu.add_command(label="Export for Training...", command=self.export_annotations)
+        file_menu.add_command(label="Export Dictionary...", command=self.export_dictionary)
         file_menu.add_separator()
         file_menu.add_command(label="Save Annotations Only...", command=self.save_annotations)
         file_menu.add_separator()
@@ -1314,6 +1315,92 @@ class TextAnnotator:
         except Exception as e:
             messagebox.showerror("Export Error", f"An error occurred during export:\n{e}", parent=self.root)
             traceback.print_exc()
+
+    def export_dictionary(self):
+        if not self.annotations:
+            messagebox.showinfo("Infó", "Nincsenek annotációk a sessionben.", parent=self.root)
+            return
+
+        used_tags = set()
+        for fp, data in self.annotations.items():
+            for ann in data.get('entities', []):
+                used_tags.add(ann['tag'])
+
+        if not used_tags:
+            messagebox.showinfo("Infó", "Nincsenek kigyűjthető entitások.", parent=self.root)
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Szótár exportálása (Export Dictionary)")
+        dialog.geometry("350x450")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Válaszd ki az exportálandó címkéket:", font=('TkDefaultFont', 10, 'bold')).pack(pady=(10, 5))
+
+        list_frame = tk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        sorted_tags = sorted(list(used_tags), key=str.lower)
+        for tag in sorted_tags:
+            listbox.insert(tk.END, tag)
+
+        listbox.select_set(0, tk.END)
+
+        btn_frame_top = tk.Frame(dialog)
+        btn_frame_top.pack(fill=tk.X, padx=20, pady=5)
+        tk.Button(btn_frame_top, text="Mind kijelöl", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(btn_frame_top, text="Kijelölés törlése", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        def do_export():
+            selected_indices = listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("Figyelem", "Nincs kiválasztva egyetlen címke sem!", parent=dialog)
+                return
+
+            selected_tags = set(listbox.get(i) for i in selected_indices)
+
+            save_path = filedialog.asksaveasfilename(
+                title="Szótár mentése",
+                defaultextension=".txt",
+                filetypes=[("Text Dictionary", "*.txt"), ("All files", "*.*")],
+                parent=dialog
+            )
+
+            if not save_path:
+                return
+
+            unique_entities = set()
+            for fp, data in self.annotations.items():
+                for ann in data.get('entities', []):
+                    if ann['tag'] in selected_tags:
+                        txt = ann['text'].strip()
+                        txt = txt.replace('\n', ' ').replace('\r', '').replace('\t', ' ')
+                        if txt:
+                            unique_entities.add((txt, ann['tag']))
+
+            try:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    for txt, tag in sorted(unique_entities, key=lambda x: (x[1], x[0].lower())):
+                        f.write(f"{txt}\t{tag}\n")
+
+                self.status_var.set(f"Dictionary ({len(unique_entities)} entities) exported: {os.path.basename(save_path)}")
+                messagebox.showinfo("Siker", f"Success saved {len(unique_entities)} unique entities!", parent=dialog)
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Hiba", f"Failed to save file.:\n{e}", parent=dialog)
+
+        btn_frame_bottom = tk.Frame(dialog)
+        btn_frame_bottom.pack(fill=tk.X, padx=20, pady=(10, 20))
+        tk.Button(btn_frame_bottom, text="Export", command=do_export, bg="lightblue", width=12).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(btn_frame_bottom, text="Cancel", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
 
     def _export_as_spacy_jsonl(self, save_path):
         with open(save_path, 'w', encoding='utf-8') as f:
