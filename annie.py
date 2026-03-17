@@ -604,13 +604,17 @@ class TextAnnotator:
     def _update_entity_tag_combobox(self):
         current_selection = self.selected_entity_tag.get()
         active_tags = self.get_active_tags()
+
         if not active_tags:
             self.selected_entity_tag.set("")
             self.entity_tag_combobox.config(values=[], state=tk.DISABLED)
         else:
-            self.entity_tag_combobox['values'] = active_tags
+            sorted_tags = sorted(active_tags, key=str.lower)
+            self.entity_tag_combobox['values'] = sorted_tags
+
             if current_selection not in active_tags:
-                self.selected_entity_tag.set(active_tags[0])
+                self.selected_entity_tag.set(sorted_tags[0])
+
             self.entity_tag_combobox.config(state="readonly")
 
     def _update_relation_type_combobox(self):
