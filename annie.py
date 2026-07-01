@@ -23,6 +23,7 @@ from bisect import bisect_left, bisect_right
 import requests
 import math
 from collections import Counter
+import xml.etree.ElementTree as ET
 
 # --- Constants ---
 SESSION_FILE_VERSION = "1.14"
@@ -151,9 +152,9 @@ class TextAnnotator:
 
     def _normalize_and_remap(self, text, spans):
         """
-        Normalizálja a szöveget (minden whitespace -> egy szóköz),
-        és újraszámolja az annotációs offseteket a normalizált szövegre.
-        A vezető/záró szóközök okozta index-elcsúszást is kompenzálja.
+        Normalizes the text (all whitespace -> single space),
+        and recalculates annotation offsets to match the normalized text.
+        Also compensates for index misalignment caused by leading/trailing spaces.
         """
         mapping = {}
         new_text = []
@@ -179,7 +180,7 @@ class TextAnnotator:
         mapping[len(text)] = new_pos
         raw_normalized = ''.join(new_text)
 
-        # Kiszámoljuk, mennyit tolódik a szöveg a baloldali strip() miatt
+        # Calculate how much the text shifts due to left strip()
         lstrip_len = len(raw_normalized) - len(raw_normalized.lstrip())
         normalized = raw_normalized.strip()
 
@@ -189,11 +190,11 @@ class TextAnnotator:
             new_end = mapping.get(span["end"])
 
             if new_start is not None and new_end is not None:
-                # Kompenzáljuk a strip() miatti elcsúszást
+                    # Compensate for offset caused by strip()
                 new_start -= lstrip_len
                 new_end -= lstrip_len
 
-                # Biztosítjuk, hogy a span határok a stringen belül maradjanak
+                # Ensure span boundaries remain within string bounds
                 new_start = max(0, new_start)
                 new_end = min(len(normalized), new_end)
 
@@ -201,7 +202,7 @@ class TextAnnotator:
                     remapped.append({
                         "start": new_start,
                         "end": new_end,
-                        "label": span["label"] # Vagy span["tag"], attól függően, mit kapott a metódus
+                        "label": span["label"]  # Either span["tag"] or span["label"], depending on what the method received
                     })
 
         return normalized, remapped
@@ -652,10 +653,19 @@ class TextAnnotator:
         directory = filedialog.askdirectory(title="Select Directory with Text Files")
         if directory:
             new_files_list = []
+            xml_converted = []
             try:
                 for filename in sorted(os.listdir(directory)):
-                    if filename.lower().endswith(".txt") and os.path.isfile(os.path.join(directory, filename)):
-                        new_files_list.append(os.path.join(directory, filename))
+                    filepath = os.path.join(directory, filename)
+                    if os.path.isfile(filepath):
+                        if filename.lower().endswith(".txt"):
+                            new_files_list.append(filepath)
+                        elif filename.lower().endswith(".xml"):
+                            # Convert XML to TXT (if CEI XML)
+                            converted_path = self._convert_cei_xml_to_txt(filepath, directory)
+                            if converted_path:
+                                new_files_list.append(converted_path)
+                                xml_converted.append(filename)
             except OSError as e:
                 messagebox.showerror("Error Loading Directory", f"Could not read directory contents:\n{e}", parent=self.root)
                 return
@@ -666,10 +676,13 @@ class TextAnnotator:
                 for file_path in self.files_list:
                     self.files_listbox.insert(tk.END, os.path.basename(file_path))
                 self.load_file(0)
-                self.status_var.set(f"Loaded {len(self.files_list)} files from '{os.path.basename(directory)}'")
+                msg = f"Loaded {len(self.files_list)} files from '{os.path.basename(directory)}'"
+                if xml_converted:
+                    msg += f" (converted {len(xml_converted)} XML file(s))"
+                self.status_var.set(msg)
                 self.root.title(f"ANNIE - {os.path.basename(directory)}")
             else:
-                self.status_var.set(f"No .txt files found in '{os.path.basename(directory)}'")
+                self.status_var.set(f"No supported files found in '{os.path.basename(directory)}'")
             self._update_button_states()
 
     def convert_session_to_sentences(self):
@@ -812,23 +825,34 @@ class TextAnnotator:
             return
         source_paths = filedialog.askopenfilenames(
             title="Select Text File(s) to Add",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            filetypes=[("Text files", "*.txt"), ("XML Files", "*.xml"), ("All files", "*.*")],
             parent=self.root)
         if not source_paths: return
         destination_dir = os.path.dirname(self.files_list[0])
         current_basenames = {os.path.basename(p) for p in self.files_list}
         added_count = 0
+        xml_converted = 0
         for source_path in source_paths:
             basename = os.path.basename(source_path)
-            dest_path = os.path.join(destination_dir, basename)
-            if basename in current_basenames:
-                messagebox.showwarning("File Exists", f"A file named '{basename}' is already in this session. Skipping.", parent=self.root)
-                continue
-            if os.path.abspath(source_path) != os.path.abspath(dest_path):
-                try: shutil.copy2(source_path, dest_path)
-                except Exception as e:
-                    messagebox.showerror("Copy Error", f"Could not copy file '{basename}'.\n\nError: {e}", parent=self.root)
+            # If xml file, convert to txt
+            if basename.lower().endswith(".xml"):
+                converted_path = self._convert_cei_xml_to_txt(source_path, destination_dir)
+                if converted_path:
+                    dest_path = converted_path
+                    xml_converted += 1
+                else:
+                    # Not CEI XML, skip
                     continue
+            else:
+                dest_path = os.path.join(destination_dir, basename)
+                if basename in current_basenames:
+                    messagebox.showwarning("File Exists", f"A file named '{basename}' is already in this session. Skipping.", parent=self.root)
+                    continue
+                if os.path.abspath(source_path) != os.path.abspath(dest_path):
+                    try: shutil.copy2(source_path, dest_path)
+                    except Exception as e:
+                        messagebox.showerror("Copy Error", f"Could not copy file '{basename}'.\n\nError: {e}", parent=self.root)
+                        continue
             self.files_list.append(dest_path)
             added_count += 1
 
@@ -843,7 +867,8 @@ class TextAnnotator:
                 self.files_listbox.see(new_index)
                 self.files_listbox.activate(new_index)
             self._update_button_states()
-            self.status_var.set(f"Successfully added {added_count} file(s) to the session.")
+            msg = f"Successfully added {added_count - xml_converted} file(s) and converted {xml_converted} XML file(s) to the session."
+            self.status_var.set(msg)
 
     def load_file(self, index):
         if not (0 <= index < len(self.files_list)): return
@@ -1318,7 +1343,7 @@ class TextAnnotator:
 
     def export_dictionary(self):
         if not self.annotations:
-            messagebox.showinfo("Infó", "Nincsenek annotációk a sessionben.", parent=self.root)
+            messagebox.showinfo("Info", "No annotations in the session.", parent=self.root)
             return
 
         used_tags = set()
@@ -1327,16 +1352,16 @@ class TextAnnotator:
                 used_tags.add(ann['tag'])
 
         if not used_tags:
-            messagebox.showinfo("Infó", "Nincsenek kigyűjthető entitások.", parent=self.root)
+            messagebox.showinfo("Info", "No extractable entities found.", parent=self.root)
             return
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("Szótár exportálása (Export Dictionary)")
+        dialog.title("Export Dictionary")
         dialog.geometry("350x450")
         dialog.transient(self.root)
         dialog.grab_set()
 
-        tk.Label(dialog, text="Válaszd ki az exportálandó címkéket:", font=('TkDefaultFont', 10, 'bold')).pack(pady=(10, 5))
+        tk.Label(dialog, text="Select tags to export:", font=('TkDefaultFont', 10, 'bold')).pack(pady=(10, 5))
 
         list_frame = tk.Frame(dialog)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=20)
@@ -1356,19 +1381,19 @@ class TextAnnotator:
 
         btn_frame_top = tk.Frame(dialog)
         btn_frame_top.pack(fill=tk.X, padx=20, pady=5)
-        tk.Button(btn_frame_top, text="Mind kijelöl", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        tk.Button(btn_frame_top, text="Kijelölés törlése", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        tk.Button(btn_frame_top, text="Select all", command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(btn_frame_top, text="Clear selection", command=lambda: listbox.selection_clear(0, tk.END)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
         def do_export():
             selected_indices = listbox.curselection()
             if not selected_indices:
-                messagebox.showwarning("Figyelem", "Nincs kiválasztva egyetlen címke sem!", parent=dialog)
+                messagebox.showwarning("Warning", "No tag selected!", parent=dialog)
                 return
 
             selected_tags = set(listbox.get(i) for i in selected_indices)
 
             save_path = filedialog.asksaveasfilename(
-                title="Szótár mentése",
+                title="Save Dictionary",
                 defaultextension=".txt",
                 filetypes=[("Text Dictionary", "*.txt"), ("All files", "*.*")],
                 parent=dialog
@@ -1392,10 +1417,10 @@ class TextAnnotator:
                         f.write(f"{txt}\t{tag}\n")
 
                 self.status_var.set(f"Dictionary ({len(unique_entities)} entities) exported: {os.path.basename(save_path)}")
-                messagebox.showinfo("Siker", f"Success saved {len(unique_entities)} unique entities!", parent=dialog)
+                messagebox.showinfo("Success", f"Saved {len(unique_entities)} unique entities!", parent=dialog)
                 dialog.destroy()
             except Exception as e:
-                messagebox.showerror("Hiba", f"Failed to save file.:\n{e}", parent=dialog)
+                messagebox.showerror("Error", f"Failed to save file:\n{e}", parent=dialog)
 
         btn_frame_bottom = tk.Frame(dialog)
         btn_frame_bottom.pack(fill=tk.X, padx=20, pady=(10, 20))
@@ -1503,15 +1528,16 @@ class TextAnnotator:
     def import_annotations(self):
         import_path = filedialog.askopenfilename(
             title="Select Annotation File to Import",
-            filetypes=[("All Supported Formats", "*.conll *.jsonl"), ("CoNLL Files", "*.conll"), ("JSONL Files", "*.jsonl")],
+            filetypes=[("All Supported Formats", "*.conll *.jsonl *.xml"), ("CoNLL Files", "*.conll"), ("JSONL Files", "*.jsonl"), ("XML Files", "*.xml")],
             parent=self.root)
         if not import_path: return
         try:
             parsed_docs, found_tags = [], set()
             if import_path.lower().endswith(".conll"): parsed_docs, found_tags = self._parse_conll_into_documents(import_path)
             elif import_path.lower().endswith(".jsonl"): parsed_docs, found_tags = self._parse_jsonl_into_documents(import_path)
+            elif import_path.lower().endswith(".xml"): parsed_docs, found_tags = self._parse_cei_xml_into_documents(import_path)
             else:
-                messagebox.showwarning("Unsupported Format", "Please select a .conll or .jsonl file.")
+                messagebox.showwarning("Unsupported Format", "Please select a .conll, .jsonl or .xml file.")
                 return
             if not parsed_docs:
                 messagebox.showinfo("Info", "No valid documents found in the import file.", parent=self.root)
@@ -1535,7 +1561,14 @@ class TextAnnotator:
             if not save_dir: return
             os.makedirs(save_dir, exist_ok=True)
             if not self.files_list and parsed_docs: self._reset_state()
-            base_name_for_docs = os.path.basename(os.path.splitext(import_path)[0])
+
+            # For CEI XML files, also strip the .cei.xml extension
+            import_name = os.path.basename(import_path)
+            if import_name.lower().endswith('.cei.xml'):
+                base_name_for_docs = import_name[:-8]  # .cei.xml = 8 characters
+            else:
+                base_name_for_docs = os.path.basename(os.path.splitext(import_path)[0])
+
             new_file_paths = []
             for i, doc in enumerate(parsed_docs):
                 save_path = os.path.join(save_dir, f"{base_name_for_docs}_{i + 1}.txt")
@@ -1643,6 +1676,300 @@ class TextAnnotator:
                 current_entity = None
         if current_entity: annotations.append(current_entity)
         return reconstructed_text, annotations, found_tags
+
+    def _parse_cei_xml_into_documents(self, file_path):
+        """
+        Processes CEI XML file into documents.
+        Extracts text from cei:tenor and automatically annotates
+        diplomatic elements (place names, dates, etc.).
+        """
+        # Register CEI namespace
+        ET.register_namespace('cei', 'http://www.monasterium.net/NS/cei')
+        ET.register_namespace('atom', 'http://www.w3.org/2005/Atom')
+
+        documents = []
+        all_tags = set()
+
+        try:
+            # Parse XML file
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+
+            # Find cei:text element
+            text_elem = root.find('.//{http://www.monasterium.net/NS/cei}text')
+            if text_elem is None:
+                messagebox.showwarning("XML Error", f"No cei:text element found in {file_path}")
+                return documents, all_tags
+
+            # Extract text from cei:tenor
+            tenor_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}tenor')
+            abstract_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}abstract')
+
+            # Extract and process text
+            full_text = ""
+            annotations = []
+
+            if tenor_elem is not None:
+                tenor_text = self._extract_text_from_cei_element(tenor_elem)
+                if tenor_text.strip():
+                    full_text = tenor_text
+            elif abstract_elem is not None:
+                abstract_text = self._extract_text_from_cei_element(abstract_elem)
+                if abstract_text.strip():
+                    full_text = abstract_text
+            else:
+                # If no tenor or abstract, try to collect all text
+                full_text = self._extract_all_text(text_elem)
+
+            if not full_text.strip():
+                messagebox.showinfo("Info", f"No text content found in {file_path}")
+                return documents, []
+
+            # CEI XML import: we extract the text, and automatic annotation
+            # only works if placeName/dateRange text exactly matches
+            # the text in the document.
+            # Currently we only extract the text; annotations are added
+            # later manually or via AI-based prediction.
+
+            # Extract place names (LOC tag) - for informational purposes
+            place_names = []
+            for place_elem in text_elem.findall('.//{http://www.monasterium.net/NS/cei}placeName'):
+                place_text = self._get_element_text(place_elem)
+                if place_text.strip():
+                    place_names.append(place_text.strip())
+                    all_tags.add('LOC')
+
+            # Extract dates (DAT/TIM tag) - for informational purposes
+            date_ranges = []
+            for date_elem in text_elem.findall('.//{http://www.monasterium.net/NS/cei}dateRange'):
+                date_text = self._get_element_text(date_elem)
+                if date_text.strip():
+                    date_ranges.append(date_text.strip())
+                    all_tags.add('DAT')
+
+            # Extract identifier from atom:id
+            atom_id_elem = root.find('.//{http://www.w3.org/2005/Atom}id')
+            doc_id = atom_id_elem.text if atom_id_elem is not None else os.path.basename(file_path)
+
+            # Attempt automatic annotation
+            line_starts = [0]
+            for i, char in enumerate(full_text):
+                if char == '\n': line_starts.append(i + 1)
+            line_starts.append(len(full_text) + 1)
+
+            def offset_to_tkinter_index(offset):
+                line_idx = bisect_right(line_starts, offset) - 1
+                line = line_idx + 1
+                char = offset - line_starts[line_idx]
+                return f"{line}.{char}"
+
+            # Annotate place names (only if place_name is found exactly in the text)
+            for place_name in place_names:
+                # Find the place_name in the text
+                idx = full_text.find(place_name)
+                if idx != -1:
+                    start_pos = idx
+                    end_pos = idx + len(place_name)
+                    annotations.append({
+                        'start': start_pos,
+                        'end': end_pos,
+                        'tag': 'LOC'
+                    })
+
+            # Annotate dates
+            for date_text in date_ranges:
+                idx = full_text.find(date_text)
+                if idx != -1:
+                    start_pos = idx
+                    end_pos = idx + len(date_text)
+                    annotations.append({
+                        'start': start_pos,
+                        'end': end_pos,
+                        'tag': 'DAT'
+                    })
+
+            documents.append({
+                'text': full_text,
+                'annotations': annotations,
+                'source_id': doc_id
+            })
+
+        except ET.ParseError as e:
+            messagebox.showerror("XML Parse Error", f"Could not parse XML file:\n{e}", parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Error processing CEI XML file:\n{e}", parent=self.root)
+            traceback.print_exc()
+
+        return documents, all_tags
+
+    def _convert_cei_xml_to_txt(self, xml_path, output_dir=None):
+        """
+        Converts CEI XML file to TXT file.
+        Extracts text from XML and saves it to a TXT file.
+        Returns the path to the new TXT file, or None if conversion fails.
+        """
+        try:
+            # Parse XML file
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+
+            # Find cei:text element
+            text_elem = root.find('.//{http://www.monasterium.net/NS/cei}text')
+            if text_elem is None:
+                messagebox.showwarning("XML Error", f"No cei:text element found in {xml_path}", parent=self.root)
+                return None
+
+            # Extract text from cei:tenor or cei:abstract
+            tenor_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}tenor')
+            abstract_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}abstract')
+
+            full_text = ""
+            if tenor_elem is not None:
+                full_text = self._extract_text_from_cei_element(tenor_elem)
+            elif abstract_elem is not None:
+                full_text = self._extract_text_from_cei_element(abstract_elem)
+            else:
+                # If no tenor or abstract, try to collect all text
+                full_text = self._extract_all_text(text_elem)
+
+            if not full_text.strip():
+                messagebox.showinfo("Info", f"No text content found in {xml_path}", parent=self.root)
+                return None
+
+            # If no output_dir, use the XML file's directory
+            if output_dir is None:
+                output_dir = os.path.dirname(xml_path)
+
+            # New filename: the XML filename with .txt extension
+            base_name = os.path.splitext(os.path.basename(xml_path))[0]
+            # If the name ends with .cei, remove it
+            if base_name.lower().endswith('.cei'):
+                base_name = base_name[:-4]
+            output_filename = f"{base_name}.txt"
+            output_path = os.path.join(output_dir, output_filename)
+
+            # Save to TXT file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(full_text.strip())
+
+            self.status_var.set(f"Converted: {os.path.basename(xml_path)} -> {output_filename}")
+            return output_path
+
+        except ET.ParseError as e:
+            messagebox.showerror("XML Parse Error", f"Could not parse XML file:\n{e}", parent=self.root)
+            return None
+        except Exception as e:
+            messagebox.showerror("Conversion Error", f"Error converting XML to TXT:\n{e}", parent=self.root)
+            traceback.print_exc()
+            return None
+
+    def _extract_text_from_cei_element(self, element):
+        """
+        Extracts text from a CEI element, preserving formatting.
+        Handles cei:lb, cei:sup, cei:quote, and other elements.
+        Normalizes text (multiple whitespace -> single space).
+        """
+        if element is None:
+            return ""
+
+        # Process recursively
+        def process_element(elem):
+            result = []
+            # Text from element - only non-whitespace
+            if elem.text and elem.text.strip():
+                result.append(elem.text.strip() + ' ')
+            elif elem.text:
+                result.append(elem.text)
+
+            # Process children
+            for child in elem:
+                tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if tag_name == 'lb':
+                    result.append('\n')
+                elif tag_name == 'sup':
+                    # Keep superscript but as simple text
+                    sup_text = self._get_element_text(child)
+                    if sup_text:
+                        result.append(sup_text)
+                elif tag_name == 'quote':
+                    # Surround quotes with double quotes
+                    quote_text = self._get_element_text(child)
+                    if quote_text:
+                        result.append(f'"{quote_text}"')
+                elif tag_name == 'abbr':
+                    # Expand abbreviations if expan attribute is present
+                    expan = child.get('expan')
+                    if expan:
+                        result.append(expan)
+                    else:
+                        result.append(self._get_element_text(child))
+                elif tag_name == 'expan':
+                    # Expanded word
+                    result.append(self._get_element_text(child))
+                elif tag_name == 'app':
+                    # Critical apparatus - lemma text is the main text, or first rdg
+                    lemma = child.find('{http://www.monasterium.net/NS/cei}lem')
+                    if lemma is not None:
+                        result.append(self._get_element_text(lemma))
+                    else:
+                        # If no lem, use first rdg (reading)
+                        rdg = child.find('{http://www.monasterium.net/NS/cei}rdg')
+                        if rdg is not None:
+                            result.append(self._get_element_text(rdg))
+                elif tag_name in ['del', 'metamark', 'figure', 'pict', 'anchor', 'ref']:
+                    # Skip these
+                    pass
+                else:
+                    # Other elements - recursive call
+                    result.append(process_element(child))
+
+                # Tail after child element - only non-whitespace
+                if child.tail and child.tail.strip():
+                    result.append(child.tail.strip() + ' ')
+                elif child.tail:
+                    result.append(child.tail)
+
+            return ''.join(result)
+
+        return process_element(element).strip()
+
+    def _get_element_text(self, element):
+        """
+        Extracts text from a CEI element, preserving formatting.
+        Returns only direct text and tail, not recursively.
+        Used for extracting place names and dates (not full text).
+        """
+        if element is None:
+            return ""
+        parts = []
+        # Direct text (not only whitespace)
+        if element.text and element.text.strip():
+            parts.append(element.text.strip())
+        elif element.text:
+            parts.append(element.text)
+        # Tail if exists
+        if element.tail and element.tail.strip():
+            parts.append(element.tail.strip())
+        elif element.tail:
+            parts.append(element.tail)
+        return ' '.join(parts).strip()
+
+    def _extract_all_text(self, element):
+        """
+        Extracts all text from an element, preserving newlines.
+        """
+        if element is None:
+            return ""
+        parts = []
+        if element.text:
+            parts.append(element.text)
+        for child in element:
+            if child.tag.endswith('}lb') or child.tag == 'lb':
+                parts.append('\n')
+            parts.append(self._extract_all_text(child))
+            if child.tail:
+                parts.append(child.tail)
+        return ''.join(parts)
 
     def _spans_overlap_numeric(self, start1_l, start1_c, end1_l, end1_c, start2_l, start2_c, end2_l, end2_c):
         span1_start, span1_end = (start1_l, start1_c), (end1_l, end1_c)
@@ -2183,7 +2510,7 @@ class TextAnnotator:
         def do_propagate():
             selected_indices = listbox.curselection()
             if not selected_indices:
-                messagebox.showwarning("Attention!", "There is not any selection!", parent=dialog)
+                messagebox.showwarning("Warning!", "No selection made!", parent=dialog)
                 return
 
             selected_files = [self.files_list[i] for i in selected_indices]
@@ -2193,8 +2520,8 @@ class TextAnnotator:
 
         btn_frame_bottom = tk.Frame(dialog)
         btn_frame_bottom.pack(fill=tk.X, padx=20, pady=(10, 20))
-        tk.Button(btn_frame_bottom, text="Futtatás (Propagate)", command=do_propagate, bg="lightblue", width=16).pack(side=tk.RIGHT, padx=(5, 0))
-        tk.Button(btn_frame_bottom, text="Mégse", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
+        tk.Button(btn_frame_bottom, text="Propagate", command=do_propagate, bg="lightblue", width=16).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(btn_frame_bottom, text="Cancel", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
 
     def _perform_propagation(self, text_to_tag_map, source_description, target_files=None):
         if target_files is None:
@@ -2513,10 +2840,10 @@ class TextAnnotator:
     def predict_from_session_memory(self):
         """Manual button: Predicts using ONLY Session Memory (Knowledge Base)."""
         if not self.current_file_path:
-            messagebox.showwarning("Nincs fájl", "Kérlek, tölts be egy oklevelet!", parent=self.root)
+            messagebox.showwarning("No File", "Please load a chart first!", parent=self.root)
             return
 
-        self.status_var.set("Session Memory elemzése...")
+        self.status_var.set("Analyzing Session Memory...")
         self.progress_bar.start()
         self.root.update()
 
@@ -2524,7 +2851,7 @@ class TextAnnotator:
             with open(self.current_file_path, 'r', encoding='utf-8') as f: content = f.read()
         except Exception as e:
             self.progress_bar.stop()
-            messagebox.showerror("Hiba", f"Nem sikerült beolvasni a fájlt:\n{e}", parent=self.root)
+            messagebox.showerror("Error", f"Failed to read file:\n{e}", parent=self.root)
             return
 
         memory_anns = self._get_memory_predictions(content)
@@ -2695,7 +3022,7 @@ class TextAnnotator:
         tk.Label(main_frame, text="3. Map AI Labels to Your Tags:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(15, 5))
 
         mapping_outer_frame = tk.Frame(main_frame)
-        mapping_outer_frame.pack(fill=tk.BOTH, expand=True) # expand=True engedi, hogy kitöltse a helyet
+        mapping_outer_frame.pack(fill=tk.BOTH, expand=True)  # expand=True allows it to fill the space
 
         mapping_canvas = tk.Canvas(mapping_outer_frame, highlightthickness=0)
         mapping_scrollbar = ttk.Scrollbar(mapping_outer_frame, orient=tk.VERTICAL, command=mapping_canvas.yview)
@@ -2819,7 +3146,7 @@ class TextAnnotator:
                 label_mapping = self.ai_label_mapping
             else:
                 active = self.get_active_tags()
-                # Automatikusan 1:1-ben megfelelteti a HF címkéket a program címkéinek, ha aktívak
+                # Automatically map HF labels to program labels 1:1 if active
                 standard_hf_labels = [
                     "PER", "ACTOR", "TITLE", "REL", "LOC", "INS", "NAT", "EST",
                     "PROP", "LEG", "TRANS", "TIM", "DAT", "MON", "TAX", "COM",
@@ -2912,7 +3239,7 @@ class TextAnnotator:
             total_words = len(tokens) if tokens else 1
             vec = {}
             for w, count in tf.items():
-                w_idf = idf.get(w, math.log((1 + N) / 1) + 1) # Ha ismeretlen szó a query-ben
+                w_idf = idf.get(w, math.log((1 + N) / 1) + 1)  # Unknown word in query
                 vec[w] = (count / total_words) * w_idf
             return vec
 
@@ -3123,18 +3450,18 @@ class TextAnnotator:
     # =========================================================================
 
     def run_llm_agent_from_hotkey(self, event=None):
-        """A 'g' billentyű lenyomásakor hívódik meg."""
+        """Called when the 'g' key is pressed."""
         if getattr(self, '_is_annotating_ai', False): return
         if not self.current_file_path: return
 
-        # Ellenőrizzük, hogy a jelenleg kiválasztott szolgáltatóhoz van-e már API kulcsunk
+        # Check if we have an API key for the currently selected provider
         key_exists = False
         if self.llm_provider == "Anthropic (Claude)" and self.claude_api_key.strip(): key_exists = True
         elif self.llm_provider == "OpenAI" and self.openai_api_key.strip(): key_exists = True
         elif self.llm_provider == "Together AI" and self.together_api_key.strip(): key_exists = True
         elif self.llm_provider == "Hugging Face" and self.hf_api_key.strip(): key_exists = True
 
-        # Ha minden adat megvan, azonnal indítjuk az LLM-et, különben feldobjuk a beállítót
+        # If all data is available, start LLM immediately; otherwise open settings dialog
         if key_exists and self.llm_model:
             self._start_llm_agent()
         else:
@@ -3142,7 +3469,7 @@ class TextAnnotator:
 
     def show_llm_settings_dialog(self):
         if not self.current_file_path:
-            messagebox.showwarning("Nincs fájl", "Kérlek, tölts be egy oklevelet!", parent=self.root)
+            messagebox.showwarning("No File", "Please load a chart first!", parent=self.root)
             return
 
         dialog = tk.Toplevel(self.root)
@@ -3236,7 +3563,7 @@ class TextAnnotator:
             similar_examples = self._retrieve_similar_examples(current_text, top_k=self.llm_few_shot_count)
 
             for i, (ex_text, entities) in enumerate(similar_examples):
-                # Csak azokat az entitásokat kérjük, amik most aktívak a UI-n
+                # Request only entities currently active in UI
                 json_entities = [{"text": e["text"], "tag": e["tag"]} for e in entities if e["tag"] in active_tags]
                 if not json_entities: continue
 
@@ -3248,7 +3575,7 @@ class TextAnnotator:
     def _start_llm_agent(self):
         if getattr(self, '_is_annotating_ai', False): return
         self._is_annotating_ai = True
-        self.status_var.set(f"Generatív LLM ({self.llm_provider}) call in progress...")
+        self.status_var.set(f"Generative LLM ({self.llm_provider}) call in progress...")
         self.progress_bar.start()
 
         full_text = self.text_area.get("1.0", tk.END).strip()
@@ -3262,7 +3589,7 @@ class TextAnnotator:
                 result_json_str = ""
 
                 if self.llm_provider == "OpenAI":
-                    print(f"[OpenAI] Hívás: {self.llm_model} ...")
+                    print(f"[OpenAI] Call: {self.llm_model} ...")
                     headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
                     payload = {"model": self.llm_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096, "temperature": 0.1}
                     response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=(15, 300))
@@ -3271,7 +3598,7 @@ class TextAnnotator:
                     result_json_str = res_data["choices"][0]["message"]["content"]
 
                 elif self.llm_provider == "Together AI":
-                    print(f"[Together AI] Hívás: {self.llm_model} ...")
+                    print(f"[Together AI] Call: {self.llm_model} ...")
                     headers = {"Authorization": f"Bearer {self.together_api_key}", "Content-Type": "application/json"}
                     payload = {"model": self.llm_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096, "temperature": 0.1}
                     response = requests.post("https://api.together.xyz/v1/chat/completions", headers=headers, json=payload, timeout=(15, 300))
@@ -3374,16 +3701,16 @@ class TextAnnotator:
                 self.root.after(0, self._apply_ensemble_to_ui, memory_anns, ai_anns)
 
             except requests.exceptions.HTTPError as e:
-                error_msg = f"API Hiba: {e.response.status_code}"
+                error_msg = f"API Error: {e.response.status_code}"
                 try:
                     err_json = e.response.json()
                     error_msg = err_json.get('error', err_json)
                 except: pass
                 self._update_status_threadsafe(f"DONE|{error_msg}")
-                print(f"\n[SÚLYOS API HIBA]:\n{e.response.text}\n")
+                print(f"\n[SERIOUS API ERROR]:\n{e.response.text}\n")
             except Exception as e:
-                self._update_status_threadsafe(f"DONE|Hiba: {e}")
-                print(f"\n[HIBA RÉSZLETEK] {e}\n")
+                self._update_status_threadsafe(f"DONE|Error: {e}")
+                print(f"\n[ERROR DETAILS] {e}\n")
             finally:
                 self.root.after(0, lambda: setattr(self, '_is_annotating_ai', False))
 
