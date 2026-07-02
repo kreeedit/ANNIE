@@ -6,6 +6,9 @@ __pycache__/
 build/
 dist/
 
+# Local-only test script (kept on disk, not versioned)
+test_annie.py
+
 # Virtual environments
 .venv/
 venv/
