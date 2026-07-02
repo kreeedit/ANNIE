@@ -1,0 +1,45 @@
+# -*- coding: utf-8 -*-
+import tkinter as tk
+
+class MenuMixin:
+    """Top-level menu bar."""
+
+    def create_menu(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Open Directory", command=self.load_directory)
+        file_menu.add_command(label="Add File(s) to Session...", command=self.add_files_to_session)
+        file_menu.add_command(label="Convert Session to Sentence Mode...", command=self.convert_session_to_sentences)
+        file_menu.add_separator()
+        file_menu.add_command(label="Load Session...", command=self.load_session)
+        file_menu.add_command(label="Save Session", command=self.save_session)
+        file_menu.add_command(label="Save Session As...", command=lambda: self.save_session(force_ask=True))
+        file_menu.add_separator()
+        file_menu.add_command(label="Import Annotations...", command=self.import_annotations)
+        file_menu.add_command(label="Export for Training...", command=self.export_annotations)
+        file_menu.add_command(label="Export Dictionary...", command=self.export_dictionary)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save Annotations Only...", command=self.save_annotations)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_closing)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        self.settings_menu = tk.Menu(menubar, tearoff=0)
+        self.settings_menu.add_command(label="Manage Entity Tags...", command=self.manage_entity_tags)
+        self.settings_menu.add_command(label="Manage Relation Types...", command=self.manage_relation_types)
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Load Tag/Relation Schema...", command=self.load_schema)
+        self.settings_menu.add_command(label="Save Tag/Relation Schema...", command=self.save_schema)
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Load Dictionary & Propagate Entities...", command=self.load_and_propagate_from_dictionary)
+        self.settings_menu.add_command(label="Pre-annotate with Hybrid AI...", command=self.pre_annotate_with_ai)
+        self.settings_menu.add_command(label="Predict Current from Session Memory...", command=self.predict_from_session_memory)
+        self.settings_menu.add_command(label="Generative LLM Agent (Few-Shot)...", command=self.show_llm_settings_dialog)
+        self.settings_menu.add_separator()
+        mode_menu = tk.Menu(self.settings_menu, tearoff=0)
+        self.settings_menu.add_cascade(label="Selection Mode (Session Type)", menu=mode_menu)
+        mode_menu.add_radiobutton(label="Word-based (Snap to whole words)", variable=self.selection_mode, value="word")
+        mode_menu.add_radiobutton(label="Character-based (Exact selection)", variable=self.selection_mode, value="char")
+        self.settings_menu.add_checkbutton(label="Allow Multi-label & Overlapping Annotations", variable=self.allow_multilabel_overlap, onvalue=True, offvalue=False)
+        menubar.add_cascade(label="Settings", menu=self.settings_menu)
+        self.root.config(menu=menubar)
