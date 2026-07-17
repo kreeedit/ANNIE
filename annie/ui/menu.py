@@ -16,6 +16,7 @@ class MenuMixin:
         file_menu.add_command(label="Save Session As...", command=lambda: self.save_session(force_ask=True))
         file_menu.add_separator()
         file_menu.add_command(label="Import Annotations...", command=self.import_annotations)
+        file_menu.add_command(label="Extract Diplomatic Parts from CEI XML...", command=self.extract_diplomatic_parts)
         file_menu.add_command(label="Export for Training...", command=self.export_annotations)
         file_menu.add_command(label="Export Dictionary...", command=self.export_dictionary)
         file_menu.add_separator()

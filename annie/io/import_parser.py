@@ -354,66 +354,423 @@ class ImportMixin:
         if element is None:
             return ""
 
-        # Process recursively
+        # Process recursively (avoid self._get_element_text — that is NOT recursive)
         def process_element(elem):
-            result = []
-            # Text from element - only non-whitespace
-            if elem.text and elem.text.strip():
-                result.append(elem.text.strip() + ' ')
-            elif elem.text:
-                result.append(elem.text)
+            try:
+                result = []
+                # Text from element - only non-whitespace
+                if elem.text and elem.text.strip():
+                    result.append(elem.text.strip() + ' ')
+                elif elem.text:
+                    result.append(elem.text)
 
-            # Process children
-            for child in elem:
-                tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag_name == 'lb':
-                    result.append('\n')
-                elif tag_name == 'sup':
-                    # Keep superscript but as simple text
-                    sup_text = self._get_element_text(child)
-                    if sup_text:
-                        result.append(sup_text)
-                elif tag_name == 'quote':
-                    # Surround quotes with double quotes
-                    quote_text = self._get_element_text(child)
-                    if quote_text:
-                        result.append(f'"{quote_text}"')
-                elif tag_name == 'abbr':
-                    # Expand abbreviations if expan attribute is present
-                    expan = child.get('expan')
-                    if expan:
-                        result.append(expan)
+                # Process children
+                for child in elem:
+                    tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    if tag_name == 'lb':
+                        result.append('\n')
+                    elif tag_name == 'sup':
+                        # Keep superscript as simple text (use recursive extraction)
+                        sup_text = process_element(child)
+                        if sup_text.strip():
+                            result.append(sup_text)
+                    elif tag_name == 'quote':
+                        # Surround quotes with double quotes
+                        quote_text = process_element(child)
+                        if quote_text.strip():
+                            result.append(f'"{quote_text.strip()}" ')
+                    elif tag_name == 'abbr':
+                        # Expand abbreviations if expan attribute is present
+                        expan = child.get('expan')
+                        if expan:
+                            result.append(expan)
+                        else:
+                            result.append(process_element(child))
+                    elif tag_name == 'expan':
+                        # Expanded word
+                        result.append(process_element(child))
+                    elif tag_name == 'app':
+                        # Critical apparatus - lemma text is the main text, or first rdg
+                        lemma = child.find('{http://www.monasterium.net/NS/cei}lem')
+                        if lemma is not None:
+                            result.append(process_element(lemma))
+                        else:
+                            # If no lem, use first rdg (reading)
+                            rdg = child.find('{http://www.monasterium.net/NS/cei}rdg')
+                            if rdg is not None:
+                                result.append(process_element(rdg))
+                    elif tag_name in ('del', 'metamark', 'figure', 'pict', 'anchor', 'ref',
+                                       'note', 'cit', 'note'):
+                        # Skip these
+                        pass
                     else:
-                        result.append(self._get_element_text(child))
-                elif tag_name == 'expan':
-                    # Expanded word
-                    result.append(self._get_element_text(child))
-                elif tag_name == 'app':
-                    # Critical apparatus - lemma text is the main text, or first rdg
-                    lemma = child.find('{http://www.monasterium.net/NS/cei}lem')
-                    if lemma is not None:
-                        result.append(self._get_element_text(lemma))
-                    else:
-                        # If no lem, use first rdg (reading)
-                        rdg = child.find('{http://www.monasterium.net/NS/cei}rdg')
-                        if rdg is not None:
-                            result.append(self._get_element_text(rdg))
-                elif tag_name in ['del', 'metamark', 'figure', 'pict', 'anchor', 'ref']:
-                    # Skip these
-                    pass
-                else:
-                    # Other elements - recursive call
-                    result.append(process_element(child))
+                        # Other elements - recursive call
+                        result.append(process_element(child))
 
-                # Tail after child element - only non-whitespace
-                if child.tail and child.tail.strip():
-                    result.append(child.tail.strip() + ' ')
-                elif child.tail:
-                    result.append(child.tail)
+                    # Tail after child element - only non-whitespace
+                    if child.tail and child.tail.strip():
+                        result.append(child.tail.strip() + ' ')
+                    elif child.tail:
+                        result.append(child.tail)
 
-            return ''.join(result)
+                return ''.join(result)
+            except Exception:
+                # Fallback: return plain text content if anything goes wrong
+                return ''.join(elem.itertext()) if elem is not None else ""
 
         return process_element(element).strip()
+
+    def extract_diplomatic_parts(self):
+        """Extract diplomatic parts from CEI XML files into the current session.
+
+        User selects a directory → ANNIE scans all .xml files → discovers diplomatic
+        parts → dialog lets user pick files + parts → TXT files saved to session dir
+        and added to the current session.
+        """
+        if not self.files_list:
+            messagebox.showwarning("No Session",
+                                   "Open a directory or load a session first.",
+                                   parent=self.root)
+            return
+
+        session_dir = os.path.dirname(self.files_list[0])
+        xml_dir = filedialog.askdirectory(
+            title="Select Directory with CEI XML Files",
+            parent=self.root)
+        if not xml_dir:
+            return
+
+        # Find all XML files
+        xml_files = sorted([
+            os.path.join(xml_dir, f) for f in os.listdir(xml_dir)
+            if f.lower().endswith('.xml') and os.path.isfile(os.path.join(xml_dir, f))
+        ])
+
+        if not xml_files:
+            messagebox.showinfo("No XML Files",
+                                f"No .xml files found in:\n{xml_dir}",
+                                parent=self.root)
+            return
+
+        # Process each XML: discover parts per file
+        ns = {'cei': 'http://www.monasterium.net/NS/cei'}
+        file_parts_list = []  # list of (filename, file_path, [part_dicts])
+
+        for xml_path in xml_files:
+            try:
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+                text_elem = root.find('.//cei:text', ns)
+                if text_elem is None:
+                    continue
+
+                parts = self._discover_diplomatic_parts(root, ns, xml_path)
+                if parts:
+                    file_parts_list.append((os.path.basename(xml_path), xml_path, parts))
+            except (ET.ParseError, Exception):
+                continue  # skip malformed XMLs silently
+
+        if not file_parts_list:
+            messagebox.showinfo("No Diplomatic Parts Found",
+                                "No CEI diplomatic parts found in any XML file in:\n"
+                                f"{xml_dir}",
+                                parent=self.root)
+            return
+
+        self._show_diplomatic_extraction_dialog(file_parts_list, session_dir)
+
+    def _show_diplomatic_extraction_dialog(self, file_parts_list, session_dir):
+        """Dialog: select part types (top) and files (bottom) to extract.
+
+        Redesigned so the user picks which part TYPE(s) to extract in one
+        place (e.g. 'abstract', 'tenor'), and then which FILE(s) from the
+        list.  No more per-file per-part checkboxes.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Extract Diplomatic Parts from CEI XML")
+        dialog.geometry("750x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        main_frame = tk.Frame(dialog, padx=15, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(main_frame,
+                 text=f"Found diplomatische Teile in {len(file_parts_list)} XML file(s).\n"
+                      "Select part types (above) and files (below) to extract.",
+                 font=('TkDefaultFont', 10, 'bold'), justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(0, 10))
+
+        # --- Collect unique part types across all files ------------------------
+        part_type_to_info = {}  # label -> {'preview': str, 'count': int, 'total_chars': int}
+        for fname, fpath, parts in file_parts_list:
+            for p in parts:
+                label = p['label']
+                if label not in part_type_to_info:
+                    part_type_to_info[label] = {
+                        'preview': p['preview'],
+                        'count': 0,
+                        'total_chars': 0,
+                    }
+                part_type_to_info[label]['count'] += 1
+                part_type_to_info[label]['total_chars'] += len(p['text'])
+
+        sorted_labels = sorted(part_type_to_info.keys(),
+                               key=lambda l: -part_type_to_info[l]['count'])
+
+        # ====================================================================
+        # TOP: Part-type selection
+        # ====================================================================
+        part_container = tk.LabelFrame(main_frame, text="Part Types to Extract",
+                                       font=('TkDefaultFont', 9, 'bold'),
+                                       padx=8, pady=5)
+        part_container.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        part_canvas_frame = tk.Frame(part_container)
+        part_canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        part_canvas = tk.Canvas(part_canvas_frame, highlightthickness=0, borderwidth=0)
+        part_scrollbar = tk.Scrollbar(part_canvas_frame, orient=tk.VERTICAL,
+                                       command=part_canvas.yview)
+        part_scrollable = tk.Frame(part_canvas)
+
+        part_scrollable.bind(
+            '<Configure>',
+            lambda e: part_canvas.configure(scrollregion=part_canvas.bbox('all')))
+        part_canvas.bind(
+            '<Configure>',
+            lambda e: part_canvas.itemconfig('inner', width=e.width))
+        part_canvas.create_window((0, 0), window=part_scrollable, anchor='nw', tags='inner')
+        part_canvas.configure(yscrollcommand=part_scrollbar.set)
+        part_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        part_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        part_type_vars = {}
+        for label in sorted_labels:
+            info = part_type_to_info[label]
+            var = tk.BooleanVar(value=True)
+            part_type_vars[label] = var
+
+            row = tk.Frame(part_scrollable)
+            row.pack(fill=tk.X, padx=5, pady=1)
+
+            cb = tk.Checkbutton(row, variable=var)
+            cb.pack(side=tk.LEFT)
+
+            tk.Label(row,
+                     text=(f"{label}  —  {info['count']}/{len(file_parts_list)} files, "
+                           f"~{info['total_chars']} chars total"),
+                     font=('TkDefaultFont', 9, 'bold')).pack(side=tk.LEFT, anchor=tk.W)
+
+            tk.Label(row, text=info['preview'],
+                     anchor=tk.W, justify=tk.LEFT, wraplength=600,
+                     fg='#666666', font=('TkDefaultFont', 8)).pack(
+                fill=tk.X, padx=(20, 0))
+
+        # ====================================================================
+        # BOTTOM: File selection
+        # ====================================================================
+        file_container = tk.LabelFrame(main_frame, text="Files to Include",
+                                       font=('TkDefaultFont', 9, 'bold'),
+                                       padx=8, pady=5)
+        file_container.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+        file_canvas_frame = tk.Frame(file_container)
+        file_canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        file_canvas = tk.Canvas(file_canvas_frame, highlightthickness=0, borderwidth=0)
+        file_scrollbar = tk.Scrollbar(file_canvas_frame, orient=tk.VERTICAL,
+                                       command=file_canvas.yview)
+        file_scrollable = tk.Frame(file_canvas)
+
+        file_scrollable.bind(
+            '<Configure>',
+            lambda e: file_canvas.configure(scrollregion=file_canvas.bbox('all')))
+        file_canvas.bind(
+            '<Configure>',
+            lambda e: file_canvas.itemconfig('inner', width=e.width))
+        file_canvas.create_window((0, 0), window=file_scrollable, anchor='nw', tags='inner')
+        file_canvas.configure(yscrollcommand=file_scrollbar.set)
+        file_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        file_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        file_vars = {}
+        for fname, fpath, parts in file_parts_list:
+            var = tk.BooleanVar(value=True)
+            file_vars[fname] = var
+
+            row = tk.Frame(file_scrollable)
+            row.pack(fill=tk.X, padx=5, pady=1)
+
+            cb = tk.Checkbutton(row, variable=var)
+            cb.pack(side=tk.LEFT)
+
+            tk.Label(row, text=f"{fname}  —  {len(parts)} part(s)",
+                     font=('TkDefaultFont', 9)).pack(side=tk.LEFT, padx=(3, 0))
+
+        # ====================================================================
+        # Bottom bar: quick-select buttons + Export
+        # ====================================================================
+        btn_bar = tk.Frame(main_frame)
+        btn_bar.pack(fill=tk.X, pady=(8, 5))
+
+        tk.Button(btn_bar, text="Parts: All", width=10,
+                  command=lambda: self._set_all(part_type_vars, True)).pack(
+            side=tk.LEFT, padx=(0, 3))
+        tk.Button(btn_bar, text="Parts: None", width=10,
+                  command=lambda: self._set_all(part_type_vars, False)).pack(
+            side=tk.LEFT, padx=(0, 10))
+        tk.Button(btn_bar, text="Files: All", width=10,
+                  command=lambda: self._set_all(file_vars, True)).pack(
+            side=tk.LEFT, padx=(0, 3))
+        tk.Button(btn_bar, text="Files: None", width=10,
+                  command=lambda: self._set_all(file_vars, False)).pack(
+            side=tk.LEFT)
+
+        tk.Label(btn_bar,
+                 text=f"Session dir: {session_dir}",
+                 fg='grey', font=('TkDefaultFont', 8)).pack(
+            side=tk.RIGHT, padx=(10, 0))
+
+        bottom_frame = tk.Frame(main_frame)
+        bottom_frame.pack(fill=tk.X, pady=(5, 0))
+
+        def do_extract():
+            selected_labels = {l for l, v in part_type_vars.items() if v.get()}
+            if not selected_labels:
+                messagebox.showwarning("No Parts Selected",
+                                       "Select at least one part type.",
+                                       parent=dialog)
+                return
+
+            selected_parts = []  # list of (filename, label, text, output_basename)
+            for fname, fpath, parts in file_parts_list:
+                if not file_vars.get(fname, tk.BooleanVar()).get():
+                    continue
+                base_name = os.path.splitext(fname)[0]
+                if base_name.lower().endswith('.cei'):
+                    base_name = base_name[:-4]
+                for part in parts:
+                    if part['label'] in selected_labels:
+                        selected_parts.append(
+                            (fname, part['label'], part['text'], base_name))
+
+            if not selected_parts:
+                messagebox.showwarning("No Selection",
+                                       "No files contain the selected part types.",
+                                       parent=dialog)
+                return
+
+            saved_count = 0
+            new_files = []
+            seen_out = set()
+            for fname, label, text, base_name in selected_parts:
+                safe_label = label.lower().replace(' ', '_').replace('/', '_')
+                out_name = f"{base_name}_{safe_label}.txt"
+                out_path = os.path.join(session_dir, out_name)
+                # Avoid overwriting: add counter suffix if needed
+                counter = 1
+                while out_path in seen_out or (os.path.exists(out_path) and counter < 100):
+                    out_path = os.path.join(session_dir,
+                                            f"{base_name}_{safe_label}_{counter}.txt")
+                    counter += 1
+                try:
+                    with open(out_path, 'w', encoding='utf-8') as f:
+                        f.write(text)
+                    seen_out.add(out_path)
+                    saved_count += 1
+                    new_files.append(out_path)
+                except Exception as e:
+                    messagebox.showerror("Error",
+                                         f"Failed to write {out_name}:\n{e}",
+                                         parent=dialog)
+                    return
+
+            # Add new files to the session
+            existing_basenames = {os.path.basename(p) for p in self.files_list}
+            truly_new = [p for p in new_files
+                         if os.path.basename(p) not in existing_basenames]
+            if truly_new:
+                self.files_list.extend(truly_new)
+                self.files_list.sort(key=lambda p: os.path.basename(p).lower())
+                current_path = self.current_file_path
+                self.files_listbox.delete(0, tk.END)
+                for fp in self.files_list:
+                    self.files_listbox.insert(tk.END, os.path.basename(fp))
+                if current_path and current_path in self.files_list:
+                    idx = self.files_list.index(current_path)
+                    self.files_listbox.selection_set(idx)
+                    self.files_listbox.see(idx)
+                    self.files_listbox.activate(idx)
+                self._update_button_states()
+
+            dialog.destroy()
+            msg = (f"Saved {saved_count} diplomatic part(s) to:\n{session_dir}\n\n"
+                   f"Added {len(truly_new)} new file(s) to the session.")
+            messagebox.showinfo("Success", msg, parent=self.root)
+            self.status_var.set(
+                f"Extracted {saved_count} diplomatic part(s), "
+                f"{len(truly_new)} added to session.")
+
+        tk.Button(bottom_frame, text="Export to Session", command=do_extract,
+                  bg="lightblue", width=16).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(bottom_frame, text="Cancel", command=dialog.destroy,
+                  width=8).pack(side=tk.RIGHT)
+
+    @staticmethod
+    def _set_all(var_dict, value):
+        """Helper: set all BooleanVars in *var_dict* to *value*."""
+        for v in var_dict.values():
+            v.set(value)
+
+    def _discover_diplomatic_parts(self, root, ns, xml_path):
+        """Discover diplomatic parts in a CEI XML file.
+
+        Returns a list of dicts: {'label': ..., 'text': ..., 'preview': ...}
+        """
+        # Map CEI tag names to human-readable labels
+        part_labels = {
+            'invocatio': 'invocatio',
+            'intitulatio': 'intitulatio',
+            'inscriptio': 'inscriptio',
+            'arenga': 'arenga',
+            'narratio': 'narratio',
+            'dispositio': 'dispositio',
+            'sanctio': 'sanctio',
+            'corroboratio': 'corroboratio',
+            'apprecatio': 'apprecatio',
+            'eschatocol': 'eschatocol',
+            'authenticationFormula': 'authentication formula',
+            'tenor': 'tenor (main text)',
+            'abstract': 'abstract / regest',
+            'datatio': 'datation',
+            'publicatio': 'publicatio / promulgatio',
+            'promulgatio': 'publicatio / promulgatio',
+            'protocol': 'protocol',
+            'textBody': 'text body',
+        }
+
+        text_elem = root.find('.//cei:text', ns)
+        if text_elem is None:
+            return []
+
+        parts = []
+        for local_name, label in part_labels.items():
+            # Use .// for recursive search — in real CEI files diplomatic parts
+            # can be nested: cei:text → cei:body → cei:tenor → cei:protocol → cei:invocatio
+            # or cei:text → cei:body → cei:chDesc → cei:abstract
+            elems = text_elem.findall(f'.//cei:{local_name}', ns)
+            for elem in elems:
+                text = self._extract_text_from_cei_element(elem)
+                if text.strip():
+                    preview = (text[:80] + '...') if len(text) > 80 else text
+                    parts.append({
+                        'label': label,
+                        'text': text,
+                        'preview': preview,
+                    })
+
+        return parts
 
     def _get_element_text(self, element):
         """
