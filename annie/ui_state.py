@@ -177,7 +177,10 @@ class UIStateMixin:
         if not self.current_file_path: return
         entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
         relations = self.annotations.get(self.current_file_path, {}).get("relations", [])
-        entity_display_map = { e['id']: e['text'][:25] + ('...' if len(e['text']) > 25 else '') for e in entities }
+        entity_display_map = {
+            e['id']: f"{e['text'][:25] + ('...' if len(e['text']) > 25 else '')} [{e['tag']}]"
+            for e in entities
+        }
         for rel in sorted(relations, key=lambda r: r['type']):
             head_text = entity_display_map.get(rel['head_id'], f"ID: {rel['head_id'][:6]}...")
             tail_text = entity_display_map.get(rel['tail_id'], f"ID: {rel['tail_id'][:6]}...")
