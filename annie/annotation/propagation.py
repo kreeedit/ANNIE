@@ -18,8 +18,48 @@ class PropagationMixin:
         if not filtered_entities: return
         text_to_tag = {ann['text'].strip(): ann['tag'] for ann in sorted(filtered_entities, key=lambda a: (a['start_line'], a['start_char'])) if ann['text'].strip()}
         if not text_to_tag: return
-        if not messagebox.askyesno("Confirm Propagation", f"Propagate {len(text_to_tag)} unique entities across all files?", parent=self.root): return
-        self._perform_propagation(text_to_tag, "Current File Propagation")
+
+        self._show_propagation_scope_dialog(text_to_tag)
+
+    def _show_propagation_scope_dialog(self, text_to_tag):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Propagation scope")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        main_frame = tk.Frame(dialog, padx=20, pady=15)
+        main_frame.pack(fill="both", expand=True)
+        tk.Label(main_frame,
+                 text=f"Propagate {len(text_to_tag)} unique entit{'y' if len(text_to_tag) == 1 else 'ies'}.\nWhere do you want to search?",
+                 justify=tk.CENTER).pack(pady=(0, 15))
+
+        btn_frame = tk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X)
+
+        def choose_current():
+            dialog.destroy()
+            self._perform_propagation(text_to_tag, "Current File Propagation", target_files=[self.current_file_path])
+
+        def choose_all():
+            dialog.destroy()
+            self._perform_propagation(text_to_tag, "Current File Propagation", target_files=None)
+
+        current_btn = tk.Button(btn_frame, text="Current File", command=choose_current, width=14)
+        current_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        all_btn = tk.Button(btn_frame, text="All Files", command=choose_all, width=14, default=tk.ACTIVE)
+        all_btn.pack(side=tk.LEFT)
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        dialog.bind('<Return>', lambda event: all_btn.invoke())
+        dialog.bind('<Escape>', lambda event: current_btn.invoke())
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_reqwidth()) / 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_reqheight()) / 2
+        dialog.geometry(f"+{int(x)}+{int(y)}")
+        all_btn.focus_set()
 
     def load_and_propagate_from_dictionary(self):
         if not self.files_list: return
