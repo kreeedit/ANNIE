@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import messagebox
 import os
+import re
 
 class SearchMixin:
     """Global session text search."""
@@ -72,7 +73,7 @@ class SearchMixin:
             start_pos = '1.0'
             first_match = None
             while True:
-                start_pos = self.text_area.search(term, start_pos, stopindex=tk.END, nocase=True)
+                start_pos = self.text_area.search(re.escape(term), start_pos, stopindex=tk.END, nocase=True, regexp=True)
                 if not start_pos: break
                 end_pos = f"{start_pos}+{len(term)}c"
                 self.text_area.tag_add('search_highlight', start_pos, end_pos)
