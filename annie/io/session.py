@@ -20,6 +20,7 @@ class SessionMixin:
         schema_data = {
             "tag_hierarchy": self.tag_hierarchy,
             "tag_active_states": self.tag_active_states,
+            "tag_visible_states": self.tag_visible_states,
             "relation_types": self.relation_types
         }
         try:
@@ -41,9 +42,12 @@ class SessionMixin:
             if "tag_hierarchy" in schema_data:
                 self.tag_hierarchy = schema_data["tag_hierarchy"]
                 self.tag_active_states = schema_data.get("tag_active_states", {})
+                self.tag_visible_states = schema_data.get("tag_visible_states",
+                                                          {t: True for t in sum(self.tag_hierarchy.values(), [])})
             elif "entity_tags" in schema_data:
                 self.tag_hierarchy = {"Imported Schema": schema_data["entity_tags"]}
                 self.tag_active_states = {t: True for t in schema_data["entity_tags"]}
+                self.tag_visible_states = {t: True for t in schema_data["entity_tags"]}
             else:
                 raise ValueError("File is not a valid schema file.")
 
@@ -112,6 +116,7 @@ class SessionMixin:
             "tag_hierarchy": self.tag_hierarchy,
             "tag_active_states": self.tag_active_states,
             "tag_propagation_states": self.tag_propagation_states,
+            "tag_visible_states": self.tag_visible_states,
             "selection_mode": self.selection_mode.get(),
             "relation_types": self.relation_types,
             "tag_colors": self.tag_colors,
@@ -186,6 +191,7 @@ class SessionMixin:
             loaded_states = session_data.get("tag_propagation_states", {})
             self._sync_flat_tags()
             self.tag_propagation_states = {tag: loaded_states.get(tag, True) for tag in self.entity_tags}
+            self.tag_visible_states = dict(session_data.get("tag_visible_states", {tag: True for tag in self.entity_tags}))
 
             self.selection_mode.set(session_data.get("selection_mode", "word"))
             self.relation_types = session_data["relation_types"]

@@ -58,6 +58,7 @@ class TextAnnotator(
         }
         self.tag_active_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
         self.tag_propagation_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
+        self.tag_visible_states = {tag: True for layer in self.tag_hierarchy.values() for tag in layer}
 
         self.entity_tags = []
         self._sync_flat_tags()

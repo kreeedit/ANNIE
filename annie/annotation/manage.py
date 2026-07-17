@@ -17,14 +17,16 @@ class ManageMixin:
         list_frame = tk.Frame(window)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
 
-        columns = ("Count", "Active", "Propagate")
+        columns = ("Visible", "Count", "Active", "Propagate")
         tree = ttk.Treeview(list_frame, columns=columns, selectmode="browse")
         tree.heading("#0", text="Layer / Tag", anchor=tk.W)
+        tree.heading("Visible", text="Visible", anchor=tk.CENTER)
         tree.heading("Count", text="Count", anchor=tk.CENTER)
         tree.heading("Active", text="Active (Hotkeys)", anchor=tk.CENTER)
         tree.heading("Propagate", text="Auto-Propagate", anchor=tk.CENTER)
 
         tree.column("#0", width=250, anchor=tk.W)
+        tree.column("Visible", width=70, anchor=tk.CENTER)
         tree.column("Count", width=60, anchor=tk.CENTER)
         tree.column("Active", width=130, anchor=tk.CENTER)
         tree.column("Propagate", width=120, anchor=tk.CENTER)
@@ -47,15 +49,20 @@ class ManageMixin:
             for layer, tags in self.tag_hierarchy.items():
                 layer_active = any(self.tag_active_states.get(t, True) for t in tags)
                 layer_prop = any(self.tag_propagation_states.get(t, True) for t in tags)
+                layer_visible = any(self.tag_visible_states.get(t, True) for t in tags)
+                l_vis = "✅ (Layer)" if layer_visible else "❌ (Layer)"
                 l_act = "✅ (Layer)" if layer_active else "❌ (Layer)"
                 l_prop = "✅ (Layer)" if layer_prop else "❌ (Layer)"
                 layer_count = sum(tag_counts.get(t, 0) for t in tags)
 
-                layer_iid = tree.insert("", tk.END, text=layer, values=(layer_count, l_act, l_prop), open=True)
+                layer_iid = tree.insert("", tk.END, text=layer,
+                                        values=(l_vis, layer_count, l_act, l_prop), open=True)
 
                 for tag in tags:
+                    is_visible = self.tag_visible_states.get(tag, True)
                     is_active = self.tag_active_states.get(tag, True)
                     is_prop = self.tag_propagation_states.get(tag, True)
+                    vis_display = "✅" if is_visible else "❌"
                     act_display = "❌"
                     if is_active:
                         if hotkey_counter <= 10:
@@ -66,7 +73,8 @@ class ManageMixin:
 
                     prop_display = "✅" if is_prop else "❌"
                     count = tag_counts.get(tag, 0)
-                    tid = tree.insert(layer_iid, tk.END, text=tag, values=(count, act_display, prop_display))
+                    tid = tree.insert(layer_iid, tk.END, text=tag,
+                                      values=(vis_display, count, act_display, prop_display))
 
                     color = self.get_color_for_tag(tag)
                     try: tree.tag_configure(tid, background=color)
@@ -78,18 +86,23 @@ class ManageMixin:
         def on_tree_double_click(event):
             item_id = tree.identify_row(event.y)
             column = tree.identify_column(event.x)
-            if not item_id or column not in ('#2', '#3'): return
+            if not item_id or column not in ('#1', '#3', '#4'): return
 
             item_text = tree.item(item_id, 'text')
             parent_id = tree.parent(item_id)
             is_layer = (parent_id == '')
 
-            if column == '#2':
+            if column == '#1':
+                if is_layer:
+                    current_vis = any(self.tag_visible_states.get(t, True) for t in self.tag_hierarchy[item_text])
+                    for t in self.tag_hierarchy[item_text]: self.tag_visible_states[t] = not current_vis
+                else: self.tag_visible_states[item_text] = not self.tag_visible_states.get(item_text, True)
+            elif column == '#3':
                 if is_layer:
                     current_active = any(self.tag_active_states.get(t, True) for t in self.tag_hierarchy[item_text])
                     for t in self.tag_hierarchy[item_text]: self.tag_active_states[t] = not current_active
                 else: self.tag_active_states[item_text] = not self.tag_active_states.get(item_text, True)
-            elif column == '#3':
+            elif column == '#4':
                 if is_layer:
                     current_prop = any(self.tag_propagation_states.get(t, True) for t in self.tag_hierarchy[item_text])
                     for t in self.tag_hierarchy[item_text]: self.tag_propagation_states[t] = not current_prop
@@ -97,6 +110,7 @@ class ManageMixin:
 
             refresh_tree()
             self._update_entity_tag_combobox()
+            self.apply_annotations_to_text()
 
         tree.bind("<Double-1>", on_tree_double_click)
 
@@ -126,6 +140,7 @@ class ManageMixin:
             self.tag_hierarchy[target_layer].append(tag)
             self.tag_active_states[tag] = True
             self.tag_propagation_states[tag] = True
+            self.tag_visible_states[tag] = True
             self._sync_flat_tags()
             refresh_tree()
             self._update_entity_tag_combobox()
@@ -159,6 +174,7 @@ class ManageMixin:
                 self.tag_hierarchy[parent_layer].remove(old_tag)
                 self.tag_active_states.pop(old_tag, None)
                 self.tag_propagation_states.pop(old_tag, None)
+                self.tag_visible_states.pop(old_tag, None)
                 self.tag_colors.pop(old_tag, None)
                 self._sync_flat_tags()
 
@@ -175,6 +191,7 @@ class ManageMixin:
                 self.tag_hierarchy[parent_layer][idx] = new_tag
                 self.tag_active_states[new_tag] = self.tag_active_states.pop(old_tag, True)
                 self.tag_propagation_states[new_tag] = self.tag_propagation_states.pop(old_tag, True)
+                self.tag_visible_states[new_tag] = self.tag_visible_states.pop(old_tag, True)
                 if old_tag in self.tag_colors: self.tag_colors[new_tag] = self.tag_colors.pop(old_tag)
                 self._sync_flat_tags()
 
@@ -191,7 +208,7 @@ class ManageMixin:
             self._update_entity_tag_combobox()
 
         tk.Button(btn_frame, text="Rename Selected", command=rename_tag).pack(side=tk.LEFT)
-        tk.Label(btn_frame, text="(Double-click columns to toggle Active/Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
+        tk.Label(btn_frame, text="(Double-click columns to toggle Visible/Active/Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
 
         def save_and_close():
             self._configure_text_tags()

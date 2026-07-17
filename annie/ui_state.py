@@ -102,7 +102,7 @@ class UIStateMixin:
                     start_pos = f"{ann['start_line']}.{ann['start_char']}"
                     end_pos = f"{ann['end_line']}.{ann['end_char']}"
                     tag = ann['tag']
-                    if tag in self.entity_tags:
+                    if tag in self.entity_tags and self.tag_visible_states.get(tag, True):
                         self.text_area.tag_add(tag, start_pos, end_pos)
 
                         if ann.get('score', 1.0) < 0.60:
