@@ -352,4 +352,69 @@ class AnnotationMixin:
         self.update_relations_list()
 
     def on_relation_select(self, event=None):
+        # Clear previous relation highlight + entities tree selection
+        original_state = self.text_area.cget('state')
+        self.text_area.config(state=tk.NORMAL)
+        try:
+            self.text_area.tag_remove("relation_highlight", "1.0", tk.END)
+        finally:
+            if self.text_area.winfo_exists():
+                self.text_area.config(state=original_state)
+
+        try:
+            self.entities_tree.selection_set([])
+        except Exception:
+            pass
+
+        selected_iids = self.relations_tree.selection()
+        if not selected_iids:
+            self._update_button_states()
+            return
+
+        relation_id = selected_iids[0]
+        relations = self.annotations.get(self.current_file_path, {}).get("relations", [])
+        entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
+
+        # Find the selected relation
+        selected_rel = next((r for r in relations if r['id'] == relation_id), None)
+        if not selected_rel:
+            self._update_button_states()
+            return
+
+        head_id = selected_rel['head_id']
+        tail_id = selected_rel['tail_id']
+
+        # Find head/tail entities and highlight them
+        entity_iids_to_select = set()
+        original_state = self.text_area.cget('state')
+        self.text_area.config(state=tk.NORMAL)
+        try:
+            for entity in entities:
+                if entity['id'] not in (head_id, tail_id):
+                    continue
+                start_pos = f"{entity['start_line']}.{entity['start_char']}"
+                end_pos = f"{entity['end_line']}.{entity['end_char']}"
+                self.text_area.tag_add("relation_highlight", start_pos, end_pos)
+
+                # Collect matching tree iids for entities list selection
+                matched_iids = self._entity_id_to_tree_iids.get(entity['id'], [])
+                entity_iids_to_select.update(matched_iids)
+
+            # Select matching entity rows in the treeview
+            if entity_iids_to_select:
+                first_iid = next(iter(entity_iids_to_select))
+                self.entities_tree.selection_set(list(entity_iids_to_select))
+                self.entities_tree.see(first_iid)
+                self.entities_tree.focus(first_iid)
+
+                # Scroll text area to the head entity
+                head_entity = next((e for e in entities if e['id'] == head_id), None)
+                if head_entity:
+                    self.text_area.see(f"{head_entity['start_line']}.{head_entity['start_char']}")
+        except Exception:
+            traceback.print_exc()
+        finally:
+            if self.text_area.winfo_exists():
+                self.text_area.config(state=original_state)
+
         self._update_button_states()

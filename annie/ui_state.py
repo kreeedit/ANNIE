@@ -18,6 +18,8 @@ class UIStateMixin:
 
         except tk.TclError as e: print(f"Warning: Could not configure text tag: {e}")
         self.text_area.tag_configure("selection_highlight", borderwidth=2, relief=tk.SOLID)
+        if "relation_highlight" not in self.text_area.tag_names():
+            self.text_area.tag_configure("relation_highlight", background="#d4edda")
 
     def _configure_treeview_tags(self):
         try: self.entities_tree.tag_configure('merged', foreground='grey', font=('TkDefaultFont', 9, 'italic'))
@@ -73,7 +75,7 @@ class UIStateMixin:
         self.text_area.config(state=tk.NORMAL)
         try:
             self.text_area.delete(1.0, tk.END)
-            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "selection_highlight", "low_confidence", tk.SEL}
+            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "selection_highlight", "low_confidence", "relation_highlight", tk.SEL}
             for tag in tags_to_clear:
                 try: self.text_area.tag_remove(tag, "1.0", tk.END)
                 except tk.TclError: pass
@@ -93,7 +95,7 @@ class UIStateMixin:
         original_state = self.text_area.cget('state')
         self.text_area.config(state=tk.NORMAL)
         try:
-            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "low_confidence"}
+            tags_to_clear = set(self.entity_tags) | {"propagated_entity", "low_confidence", "relation_highlight"}
             for tag in tags_to_clear: self.text_area.tag_remove(tag, "1.0", tk.END)
 
             entities = self.annotations.get(self.current_file_path, {}).get("entities", [])
