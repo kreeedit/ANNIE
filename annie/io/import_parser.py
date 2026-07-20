@@ -349,7 +349,8 @@ class ImportMixin:
         """
         Extracts text from a CEI element, preserving formatting.
         Handles cei:lb, cei:sup, cei:quote, and other elements.
-        Normalizes text (multiple whitespace -> single space).
+        Normalizes pretty-print whitespace (newlines + indentation from
+        the XML formatting are collapsed), but keeps explicit <cei:lb> newlines.
         """
         if element is None:
             return ""
@@ -418,22 +419,34 @@ class ImportMixin:
                 # Fallback: return plain text content if anything goes wrong
                 return ''.join(elem.itertext()) if elem is not None else ""
 
-        return process_element(element).strip()
+        raw = process_element(element)
+        # Clean up pretty-print whitespace: collapse multiple spaces/tabs,
+        # strip whitespace around newlines (but keep the newlines from <lb>),
+        # collapse consecutive blank lines
+        cleaned = re.sub(r'[ \t]{2,}', ' ', raw)
+        cleaned = re.sub(r'[ \t]*\n[ \t]*', '\n', cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned.strip()
 
     def extract_diplomatic_parts(self):
         """Extract diplomatic parts from CEI XML files into the current session.
 
         User selects a directory → ANNIE scans all .xml files → discovers diplomatic
-        parts → dialog lets user pick files + parts → TXT files saved to session dir
-        and added to the current session.
+        parts → dialog lets user pick files + parts → either:
+          ① create new TXT files and add them to the session, OR
+          ② annotate existing session files with diplomatic parts.
+        Works even in an empty session (will save TXT files instead).
         """
-        if not self.files_list:
-            messagebox.showwarning("No Session",
-                                   "Open a directory or load a session first.",
-                                   parent=self.root)
-            return
+        if self.files_list:
+            session_dir = os.path.dirname(self.files_list[0])
+        else:
+            # Empty session: ask the user for a save directory first
+            session_dir = filedialog.askdirectory(
+                title="Select Directory for Extracted TXT Files",
+                parent=self.root)
+            if not session_dir:
+                return
 
-        session_dir = os.path.dirname(self.files_list[0])
         xml_dir = filedialog.askdirectory(
             title="Select Directory with CEI XML Files",
             parent=self.root)
@@ -477,9 +490,17 @@ class ImportMixin:
                                 parent=self.root)
             return
 
-        self._show_diplomatic_extraction_dialog(file_parts_list, session_dir)
+        # Compute session file stems for annotation-matching
+        session_stems = set()
+        for fp in self.files_list:
+            base = os.path.basename(fp)
+            if base.lower().endswith('.txt'):
+                session_stems.add(base[:-4])
+        self._show_diplomatic_extraction_dialog(
+            file_parts_list, session_dir, session_stems)
 
-    def _show_diplomatic_extraction_dialog(self, file_parts_list, session_dir):
+    def _show_diplomatic_extraction_dialog(self, file_parts_list, session_dir,
+                                           session_stems=None):
         """Dialog: select part types (top) and files (bottom) to extract.
 
         Redesigned so the user picks which part TYPE(s) to extract in one
@@ -632,6 +653,27 @@ class ImportMixin:
                  fg='grey', font=('TkDefaultFont', 8)).pack(
             side=tk.RIGHT, padx=(10, 0))
 
+        # ====================================================================
+        # Mode selection: annotate existing files vs. create new TXT files
+        # ====================================================================
+        annotate_mode_var = tk.BooleanVar(value=False)
+        if session_stems:
+            mode_frame = tk.Frame(main_frame)
+            mode_frame.pack(fill=tk.X, pady=(5, 0))
+
+            tk.Checkbutton(
+                mode_frame,
+                text="Annotate matching session files with diplomatic parts",
+                variable=annotate_mode_var,
+                font=('TkDefaultFont', 9, 'bold'),
+            ).pack(side=tk.LEFT, padx=(5, 0))
+
+            tk.Label(
+                mode_frame,
+                text="(instead of creating new TXT files)",
+                fg='grey', font=('TkDefaultFont', 8),
+            ).pack(side=tk.LEFT, padx=(3, 0))
+
         bottom_frame = tk.Frame(main_frame)
         bottom_frame.pack(fill=tk.X, pady=(5, 0))
 
@@ -643,7 +685,7 @@ class ImportMixin:
                                        parent=dialog)
                 return
 
-            selected_parts = []  # list of (filename, label, text, output_basename)
+            selected_parts = []  # list of (fname, fpath, label, text, base_name)
             for fname, fpath, parts in file_parts_list:
                 if not file_vars.get(fname, tk.BooleanVar()).get():
                     continue
@@ -653,7 +695,7 @@ class ImportMixin:
                 for part in parts:
                     if part['label'] in selected_labels:
                         selected_parts.append(
-                            (fname, part['label'], part['text'], base_name))
+                            (fname, fpath, part['label'], part['text'], base_name))
 
             if not selected_parts:
                 messagebox.showwarning("No Selection",
@@ -661,56 +703,66 @@ class ImportMixin:
                                        parent=dialog)
                 return
 
-            saved_count = 0
-            new_files = []
-            seen_out = set()
-            for fname, label, text, base_name in selected_parts:
-                safe_label = label.lower().replace(' ', '_').replace('/', '_')
-                out_name = f"{base_name}_{safe_label}.txt"
-                out_path = os.path.join(session_dir, out_name)
-                # Avoid overwriting: add counter suffix if needed
-                counter = 1
-                while out_path in seen_out or (os.path.exists(out_path) and counter < 100):
-                    out_path = os.path.join(session_dir,
-                                            f"{base_name}_{safe_label}_{counter}.txt")
-                    counter += 1
-                try:
-                    with open(out_path, 'w', encoding='utf-8') as f:
-                        f.write(text)
-                    seen_out.add(out_path)
-                    saved_count += 1
-                    new_files.append(out_path)
-                except Exception as e:
-                    messagebox.showerror("Error",
-                                         f"Failed to write {out_name}:\n{e}",
-                                         parent=dialog)
-                    return
+            # --- BRANCH: annotate existing files vs. create new TXT files ----
+            if session_stems and annotate_mode_var.get():
+                annotation_count = self._apply_diplomatic_annotations(
+                    selected_parts, session_stems)
+                dialog.destroy()
+                msg = (f"Applied {annotation_count} diplomatic annotation(s) "
+                       f"to session files.")
+                messagebox.showinfo("Success", msg, parent=self.root)
+                self.status_var.set(msg)
+            else:
+                saved_count = 0
+                new_files = []
+                seen_out = set()
+                for fname, fpath, label, text, base_name in selected_parts:
+                    safe_label = label.lower().replace(' ', '_').replace('/', '_')
+                    out_name = f"{base_name}_{safe_label}.txt"
+                    out_path = os.path.join(session_dir, out_name)
+                    # Avoid overwriting: add counter suffix if needed
+                    counter = 1
+                    while out_path in seen_out or (os.path.exists(out_path) and counter < 100):
+                        out_path = os.path.join(session_dir,
+                                                f"{base_name}_{safe_label}_{counter}.txt")
+                        counter += 1
+                    try:
+                        with open(out_path, 'w', encoding='utf-8') as f:
+                            f.write(text)
+                        seen_out.add(out_path)
+                        saved_count += 1
+                        new_files.append(out_path)
+                    except Exception as e:
+                        messagebox.showerror("Error",
+                                             f"Failed to write {out_name}:\n{e}",
+                                             parent=dialog)
+                        return
 
-            # Add new files to the session
-            existing_basenames = {os.path.basename(p) for p in self.files_list}
-            truly_new = [p for p in new_files
-                         if os.path.basename(p) not in existing_basenames]
-            if truly_new:
-                self.files_list.extend(truly_new)
-                self.files_list.sort(key=lambda p: os.path.basename(p).lower())
-                current_path = self.current_file_path
-                self.files_listbox.delete(0, tk.END)
-                for fp in self.files_list:
-                    self.files_listbox.insert(tk.END, os.path.basename(fp))
-                if current_path and current_path in self.files_list:
-                    idx = self.files_list.index(current_path)
-                    self.files_listbox.selection_set(idx)
-                    self.files_listbox.see(idx)
-                    self.files_listbox.activate(idx)
-                self._update_button_states()
+                # Add new files to the session
+                existing_basenames = {os.path.basename(p) for p in self.files_list}
+                truly_new = [p for p in new_files
+                             if os.path.basename(p) not in existing_basenames]
+                if truly_new:
+                    self.files_list.extend(truly_new)
+                    self.files_list.sort(key=lambda p: os.path.basename(p).lower())
+                    current_path = self.current_file_path
+                    self.files_listbox.delete(0, tk.END)
+                    for fp in self.files_list:
+                        self.files_listbox.insert(tk.END, os.path.basename(fp))
+                    if current_path and current_path in self.files_list:
+                        idx = self.files_list.index(current_path)
+                        self.files_listbox.selection_set(idx)
+                        self.files_listbox.see(idx)
+                        self.files_listbox.activate(idx)
+                    self._update_button_states()
 
-            dialog.destroy()
-            msg = (f"Saved {saved_count} diplomatic part(s) to:\n{session_dir}\n\n"
-                   f"Added {len(truly_new)} new file(s) to the session.")
-            messagebox.showinfo("Success", msg, parent=self.root)
-            self.status_var.set(
-                f"Extracted {saved_count} diplomatic part(s), "
-                f"{len(truly_new)} added to session.")
+                dialog.destroy()
+                msg = (f"Saved {saved_count} diplomatic part(s) to:\n{session_dir}\n\n"
+                       f"Added {len(truly_new)} new file(s) to the session.")
+                messagebox.showinfo("Success", msg, parent=self.root)
+                self.status_var.set(
+                    f"Extracted {saved_count} diplomatic part(s), "
+                    f"{len(truly_new)} added to session.")
 
         tk.Button(bottom_frame, text="Export to Session", command=do_extract,
                   bg="lightblue", width=16).pack(side=tk.RIGHT, padx=(5, 0))
@@ -722,6 +774,187 @@ class ImportMixin:
         """Helper: set all BooleanVars in *var_dict* to *value*."""
         for v in var_dict.values():
             v.set(value)
+
+    def _setup_diplomatic_layer(self, tag_names):
+        """Ensure the 'Diplomatic' layer exists with the given tag names."""
+        if "Diplomatic" not in self.tag_hierarchy:
+            self.tag_hierarchy["Diplomatic"] = []
+        for tagname in tag_names:
+            if tagname not in self.entity_tags:
+                self.tag_hierarchy["Diplomatic"].append(tagname)
+                self.tag_active_states[tagname] = True
+                self.tag_propagation_states[tagname] = True
+                self.tag_visible_states[tagname] = True
+        self._sync_flat_tags()
+        self._ensure_default_colors()
+        self._update_entity_tag_combobox()
+        self._configure_text_tags()
+
+    @staticmethod
+    def _diplomatic_label_to_tag(label):
+        """Convert a human-readable diplomatic part label to a short tag name.
+
+        e.g. 'tenor (main text)' → 'tenor', 'abstract / regest' → 'abstract'
+        """
+        tag = re.sub(r'\([^)]*\)', '', label).strip()
+        if '/' in tag:
+            tag = tag.split('/')[0].strip()
+        tag = tag.strip().replace(' ', '_').replace('-', '_')
+        return tag if tag else label
+
+    def _apply_diplomatic_annotations(self, selected_parts, session_stems):
+        """Apply diplomatic parts as annotations to matching session files.
+
+        *selected_parts* is a list of (fname, fpath, label, text, base_name).
+        For each part, we try to match the XML file's base_name to a session
+        file and, if found, search the part text in the file content and
+        create an annotation entry.
+        Returns the total number of annotations created.
+        """
+        import uuid
+        from bisect import bisect_right
+
+        # Build reverse lookup: session file stem → full path
+        stem_to_path = {}
+        for fp in self.files_list:
+            base = os.path.basename(fp)
+            if base.lower().endswith('.txt'):
+                stem = base[:-4]
+                stem_to_path[stem] = fp
+
+        # Collect all tag names used so we can set up the Diplomatic layer
+        used_tags = set()
+        # Group annotations per file path
+        file_annotations_map = {}  # file_path → list of annotation dicts
+
+        for fname, fpath, label, text, xml_stem in selected_parts:
+            # Find matching session file
+            session_path = stem_to_path.get(xml_stem)
+            if not session_path:
+                # Try fuzzy matching: if xml_stem has a prefix the TXT doesn't
+                for stem, fp in stem_to_path.items():
+                    if stem in xml_stem or xml_stem in stem:
+                        session_path = fp
+                        break
+            if not session_path:
+                continue
+
+            tag_name = self._diplomatic_label_to_tag(label)
+            used_tags.add(tag_name)
+
+            # Read the TXT file content
+            try:
+                with open(session_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            # Normalize both text and content for matching
+            def normalize(s):
+                return ' '.join(s.split())
+
+            # Try exact match first, then normalized match
+            part_text = text
+            match_pos = content.find(part_text)
+            if match_pos == -1:
+                norm_part = normalize(part_text)
+                norm_content = normalize(content)
+                match_pos = norm_content.find(norm_part)
+                if match_pos == -1:
+                    continue  # text not found — skip
+                # We found the position in normalized text, but we need the
+                # offset in the original content.  Approximate by finding
+                # the norm_part substring that bridges whitespace differences.
+                # Fallback: search for the first 40 chars (uncommon enough
+                # to be unique, common enough to survive normalization).
+                short_prefix = normalize(part_text[:40])
+                match_pos = normalize(content).find(short_prefix)
+                if match_pos == -1:
+                    continue
+
+                # Now that we have a position in normalized content, recover
+                # original offset by scanning forward until the char matches
+                # content char by char
+                raw_pos = 0
+                norm_idx = 0
+                while norm_idx < match_pos and raw_pos < len(content):
+                    if content[raw_pos].isspace():
+                        raw_pos += 1
+                    else:
+                        if not content[raw_pos].isspace():
+                            norm_idx += 1
+                        raw_pos += 1
+                match_pos = raw_pos
+
+            # Compute tkinter indices for the matched position
+            line_starts = [0]
+            for i, ch in enumerate(content):
+                if ch == '\n':
+                    line_starts.append(i + 1)
+            line_starts.append(len(content) + 1)
+
+            end_pos = match_pos + len(part_text)
+            # Clamp to content length
+            end_pos = min(end_pos, len(content))
+
+            start_str = self._char_offset_to_tkinter_index_from_offsets(
+                line_starts, match_pos)
+            end_str = self._char_offset_to_tkinter_index_from_offsets(
+                line_starts, end_pos)
+
+            try:
+                start_l, start_c = map(int, start_str.split('.'))
+                end_l, end_c = map(int, end_str.split('.'))
+            except ValueError:
+                continue
+
+            annotation = {
+                'id': uuid.uuid4().hex,
+                'start_line': start_l,
+                'start_char': start_c,
+                'end_line': end_l,
+                'end_char': end_c,
+                'text': content[match_pos:end_pos],
+                'tag': tag_name,
+                'propagated': False,
+            }
+            file_annotations_map.setdefault(session_path, []).append(annotation)
+
+        if not file_annotations_map:
+            messagebox.showinfo("No Matches",
+                                "Could not match any CEI XML files to session TXT files. "
+                                "Make sure the XML filenames correspond to session TXT files "
+                                "(e.g. 'charta_01.cei.xml' ↔ 'charta_01.txt').",
+                                parent=self.root)
+            return 0
+
+        # Set up the Diplomatic layer with the tags we need
+        self._setup_diplomatic_layer(used_tags)
+
+        # Apply annotations to the session data
+        total_annotations = 0
+        for file_path, new_entities in file_annotations_map.items():
+            file_data = self.annotations.setdefault(
+                file_path, {"entities": [], "relations": []})
+            file_data["entities"].extend(new_entities)
+            total_annotations += len(new_entities)
+
+        # Refresh UI if the current file received annotations
+        if self.current_file_path in file_annotations_map:
+            self._build_entity_lookup_map(
+                self.annotations[self.current_file_path].get("entities", []))
+            self.apply_annotations_to_text()
+            self.update_entities_list()
+            self.update_relations_list()
+        elif self.current_file_path is None and file_annotations_map:
+            # Load the first annotated file
+            first_path = next(iter(file_annotations_map))
+            if first_path in self.files_list:
+                idx = self.files_list.index(first_path)
+                self.load_file(idx)
+
+        self._update_button_states()
+        return total_annotations
 
     def _discover_diplomatic_parts(self, root, ns, xml_path):
         """Discover diplomatic parts in a CEI XML file.

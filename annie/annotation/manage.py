@@ -210,6 +210,98 @@ class ManageMixin:
         tk.Button(btn_frame, text="Rename Selected", command=rename_tag).pack(side=tk.LEFT)
         tk.Label(btn_frame, text="(Double-click columns to toggle Visible/Active/Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
 
+        # --- Layer management buttons ---
+        def add_layer():
+            from tkinter import simpledialog
+            name = simpledialog.askstring("Add Layer", "New layer name:",
+                                          parent=window)
+            if not name:
+                return
+            name = name.strip()
+            if not name:
+                return
+            if name in self.tag_hierarchy:
+                messagebox.showwarning("Duplicate", f"Layer '{name}' already exists.",
+                                       parent=window)
+                return
+            self.tag_hierarchy[name] = []
+            refresh_tree()
+
+        def rename_layer():
+            from tkinter import simpledialog
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("No Selection", "Select a layer first.",
+                                    parent=window)
+                return
+            item_id = selected[0]
+            if tree.parent(item_id) != '':
+                messagebox.showinfo("Not a Layer",
+                                    "Select a layer (parent item), not a tag.",
+                                    parent=window)
+                return
+            old_name = tree.item(item_id, 'text')
+            new_name = simpledialog.askstring("Rename Layer",
+                                              f"New name for layer '{old_name}':",
+                                              initialvalue=old_name,
+                                              parent=window)
+            if not new_name:
+                return
+            new_name = new_name.strip()
+            if not new_name or new_name == old_name:
+                return
+            if new_name in self.tag_hierarchy:
+                messagebox.showwarning("Duplicate",
+                                       f"Layer '{new_name}' already exists.",
+                                       parent=window)
+                return
+            self.tag_hierarchy[new_name] = self.tag_hierarchy.pop(old_name)
+            refresh_tree()
+
+        def delete_layer():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("No Selection", "Select a layer first.",
+                                    parent=window)
+                return
+            item_id = selected[0]
+            if tree.parent(item_id) != '':
+                messagebox.showinfo("Not a Layer",
+                                    "Select a layer (parent item), not a tag.",
+                                    parent=window)
+                return
+            layer_name = tree.item(item_id, 'text')
+            tags = self.tag_hierarchy[layer_name]
+            if tags:
+                msg = (f"Delete layer '{layer_name}'?\n\n"
+                       f"It contains {len(tags)} tag(s): {', '.join(tags)}.\n"
+                       f"All tags in this layer will be removed from the session.")
+                if not messagebox.askyesno("Delete Layer", msg, parent=window):
+                    return
+            else:
+                if not messagebox.askyesno("Delete Layer",
+                                           f"Delete empty layer '{layer_name}'?",
+                                           parent=window):
+                    return
+
+            for tag in tags:
+                self.tag_active_states.pop(tag, None)
+                self.tag_propagation_states.pop(tag, None)
+                self.tag_visible_states.pop(tag, None)
+                self.tag_colors.pop(tag, None)
+
+            del self.tag_hierarchy[layer_name]
+            self._sync_flat_tags()
+            self._update_entity_tag_combobox()
+            refresh_tree()
+
+        tk.Button(btn_frame, text="Add Layer", command=add_layer,
+                  width=10).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Button(btn_frame, text="Rename Layer", command=rename_layer,
+                  width=10).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Button(btn_frame, text="Delete Layer", command=delete_layer,
+                  width=10).pack(side=tk.LEFT, padx=(5, 0))
+
         def save_and_close():
             self._configure_text_tags()
             if self.current_file_path:
