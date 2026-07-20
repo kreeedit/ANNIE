@@ -160,7 +160,17 @@ class PropagationMixin:
 
         compiled_regexes = []
         for text, tag in text_to_tag_map.items():
-            pattern = r'\b' + re.escape(text) + r'\b'
+            # Only use word boundary (\b) when the adjacent character is a
+            # word character (\w).  The trailing \b would NEVER match when
+            # the search text ends with punctuation, parentheses, or other
+            # non-alphanumeric characters (e.g. "Ego Iohannes notarius
+            # interfui. (S)").
+            pattern = ''
+            if text and text[0].isalnum():
+                pattern += r'\b'
+            pattern += re.escape(text)
+            if text and text[-1].isalnum():
+                pattern += r'\b'
             compiled_regexes.append((re.compile(pattern, re.IGNORECASE), tag, text))
         compiled_regexes.sort(key=lambda x: len(x[2]), reverse=True)
 

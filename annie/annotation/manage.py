@@ -207,7 +207,34 @@ class ManageMixin:
             refresh_tree()
             self._update_entity_tag_combobox()
 
+        def delete_tag():
+            selected = tree.selection()
+            if not selected:
+                return
+            item_id = selected[0]
+            if tree.parent(item_id) == '':
+                messagebox.showinfo("Info", "Select a Tag (not a Layer) to delete.", parent=window)
+                return
+            tag = tree.item(item_id, 'text')
+            if not messagebox.askyesno("Delete Tag",
+                                       f"Delete tag '{tag}'?\n\n"
+                                       "Annotations using this tag will remain "
+                                       "but the tag itself will be removed.",
+                                       parent=window):
+                return
+            parent_layer = tree.item(tree.parent(item_id), 'text')
+            self.tag_hierarchy[parent_layer].remove(tag)
+            self.tag_active_states.pop(tag, None)
+            self.tag_propagation_states.pop(tag, None)
+            self.tag_visible_states.pop(tag, None)
+            self.tag_colors.pop(tag, None)
+            self._sync_flat_tags()
+            self._update_entity_tag_combobox()
+            refresh_tree()
+
         tk.Button(btn_frame, text="Rename Selected", command=rename_tag).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Delete Tag", command=delete_tag,
+                  width=10).pack(side=tk.LEFT, padx=(5, 0))
         tk.Label(btn_frame, text="(Double-click columns to toggle Visible/Active/Propagate)", fg="grey").pack(side=tk.LEFT, padx=10)
 
         # --- Layer management buttons ---

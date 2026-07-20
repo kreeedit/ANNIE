@@ -10,6 +10,47 @@ from bisect import bisect_left, bisect_right
 import xml.etree.ElementTree as ET
 import os
 
+# ── Diplomatically-structured part definitions ──────────────────────
+# Macro elements are XML wrappers that contain sub-parts.
+# Their annotations span the full range of their sub-parts.
+DIPLOMATIC_MACRO_PARTS = {
+    "protocol": {
+        "label": "Protocol",
+        "cei_tags": ("invocatio", "intitulatio", "inscriptio", "arenga"),
+    },
+    "tenor": {
+        "label": "Tenor",
+        "cei_tags": ("narratio", "dispositio", "sanctio", "corroboratio", "apprecatio"),
+    },
+    "eschatocol": {
+        "label": "Eschatocol",
+        "cei_tags": ("authenticationFormula", "datatio"),
+    },
+}
+
+MEMBER_OF_MACRO = {}
+for _macro_key, _minfo in DIPLOMATIC_MACRO_PARTS.items():
+    for _cei_tag in _minfo["cei_tags"]:
+        MEMBER_OF_MACRO[_cei_tag] = _macro_key
+
+# All diplomatic sub-part tag names (used to route new tags to the
+# "Diplomatic" layer instead of "Imported Tags").
+_ALL_DIPLO_CEI_TAGS = set()
+for _minfo in DIPLOMATIC_MACRO_PARTS.values():
+    _ALL_DIPLO_CEI_TAGS.update(_minfo["cei_tags"])
+_ALL_DIPLO_CEI_TAGS.update(("abstract", "publicatio", "promulgatio", "textBody"))
+DIPLOMATIC_TAGS = frozenset(
+    _minfo["label"].lower()  # 'protocol', 'tenor', 'eschatocol'
+    for _minfo in DIPLOMATIC_MACRO_PARTS.values()
+) | {
+    # Sub-part tag names (as produced by _diplomatic_label_to_tag)
+    "invocatio", "intitulatio", "inscriptio", "arenga",
+    "narratio", "dispositio", "sanctio", "corroboratio", "apprecatio",
+    "authentication_formula", "datatio",
+    "abstract", "publicatio", "text_body",
+}
+
+
 class ImportMixin:
     """Import + CoNLL/JSONL/CEI-XML parsing."""
 
@@ -33,9 +74,22 @@ class ImportMixin:
             new_tags = found_tags - set(self.entity_tags)
             if new_tags:
                 if messagebox.askyesno("New Tags Found", f"Found new tags: {', '.join(new_tags)}.\n\nAdd them to the session?"):
-                    if "Imported Tags" not in self.tag_hierarchy: self.tag_hierarchy["Imported Tags"] = []
+                    # Diplomatic tags -> "Diplomatic" layer; everything else -> "Imported Tags"
+                    diplo_new = {t for t in new_tags if t.lower() in DIPLOMATIC_TAGS}
+                    other_new = new_tags - diplo_new
+                    if diplo_new:
+                        if "Diplomatic" not in self.tag_hierarchy:
+                            self.tag_hierarchy["Diplomatic"] = []
+                        for t in sorted(diplo_new):
+                            if t not in self.entity_tags:
+                                self.tag_hierarchy["Diplomatic"].append(t)
+                    if other_new:
+                        if "Imported Tags" not in self.tag_hierarchy:
+                            self.tag_hierarchy["Imported Tags"] = []
+                        for t in sorted(other_new):
+                            if t not in self.entity_tags:
+                                self.tag_hierarchy["Imported Tags"].append(t)
                     for t in new_tags:
-                        self.tag_hierarchy["Imported Tags"].append(t)
                         self.tag_active_states[t] = True
                         self.tag_propagation_states[t] = True
                     self._sync_flat_tags()
@@ -45,6 +99,24 @@ class ImportMixin:
                     approved_tags = set(self.entity_tags)
                     for doc in parsed_docs:
                         doc['annotations'] = [ann for ann in doc['annotations'] if ann['tag'] in approved_tags]
+
+            # ── CEI XML: offer to annotate existing session files ──────────
+            import_path_lower = import_path.lower()
+            if (import_path_lower.endswith('.xml')
+                    and self.files_list
+                    and parsed_docs
+                    and any(doc['annotations'] for doc in parsed_docs)):
+                msg = (
+                    "The CEI XML contains diplomatic annotations.\n\n"
+                    "Do you want to annotate the session files that already\n"
+                    "match the XML text, instead of creating new TXT files?"
+                )
+                annotate_existing = messagebox.askyesno(
+                    "Annotate Existing Files", msg, parent=self.root)
+                if annotate_existing:
+                    self._import_cei_annotate_existing(parsed_docs, found_tags)
+                    return
+
             save_dir = self._ask_for_save_directory(os.path.dirname(import_path))
             if not save_dir: return
             os.makedirs(save_dir, exist_ok=True)
@@ -85,6 +157,162 @@ class ImportMixin:
         except Exception as e:
             messagebox.showerror("Import Error", f"An error occurred during import:\n{e}", parent=self.root)
             traceback.print_exc()
+
+    def _import_cei_annotate_existing(self, parsed_docs, found_tags):
+        """Annotate existing session files with diplomatic parts from CEI XML.
+
+        For each parsed document, find the matching session file by content,
+        then apply the annotations to it.  Diplomatic tags are routed to
+        the "Diplomatic" layer.
+        """
+        import uuid
+
+        def normalize(s):
+            return ' '.join(s.split())
+
+        # Build session content index: normalized text → file path
+        session_by_norm = {}
+        for fp in self.files_list:
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                session_by_norm[normalize(content)] = fp
+            except Exception:
+                continue
+
+        if not session_by_norm:
+            messagebox.showinfo("No Files",
+                                "Could not read any session files.",
+                                parent=self.root)
+            return
+
+        annotated_files = 0
+        total_annotations = 0
+        all_used_tags = set()
+
+        for doc in parsed_docs:
+            if not doc['annotations']:
+                continue
+
+            doc_norm = normalize(doc['text'])
+            # Find the session file whose (normalised) content contains
+            # the normalised document text
+            matched_path = None
+            for content_norm, fp in session_by_norm.items():
+                if doc_norm in content_norm or content_norm in doc_norm:
+                    matched_path = fp
+                    break
+            if not matched_path:
+                continue  # no matching file in the session
+
+            # Read the actual file content to compute correct offsets
+            try:
+                with open(matched_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            # Compute line-starts for tkinter index conversion
+            line_starts = [0]
+            for i, ch in enumerate(content):
+                if ch == '\n':
+                    line_starts.append(i + 1)
+            line_starts.append(len(content) + 1)
+
+            # Locate the document text within the file content
+            # (the file may contain the document as a contiguous block)
+            doc_text = doc['text']
+            pos = content.find(doc_text)
+            if pos == -1:
+                # Fallback: normalised search
+                norm_content = normalize(content)
+                npos = norm_content.find(doc_norm)
+                if npos == -1:
+                    continue
+                # Recover raw offset from normalised offset
+                raw = 0
+                ni = 0
+                while ni < npos and raw < len(content):
+                    if content[raw].isspace():
+                        raw += 1
+                    else:
+                        ni += 1
+                        raw += 1
+                pos = raw
+
+            # Convert each annotation's char offsets to tkinter indices
+            new_entities = []
+            for ann in doc['annotations']:
+                start_char = pos + ann['start']
+                end_char = pos + ann['end']
+                start_str = self._char_offset_to_tkinter_index_from_offsets(
+                    line_starts, start_char)
+                end_str = self._char_offset_to_tkinter_index_from_offsets(
+                    line_starts, end_char)
+                try:
+                    sl, sc = map(int, start_str.split('.'))
+                    el, ec = map(int, end_str.split('.'))
+                except ValueError:
+                    continue
+
+                tag_name = ann['tag']
+                all_used_tags.add(tag_name)
+                new_entities.append({
+                    'id': uuid.uuid4().hex,
+                    'start_line': sl,
+                    'start_char': sc,
+                    'end_line': el,
+                    'end_char': ec,
+                    'text': content[start_char:end_char],
+                    'tag': tag_name,
+                })
+
+            if not new_entities:
+                continue
+
+            # Add entities to the session annotations for this file
+            file_anns = self.annotations.setdefault(
+                matched_path, {"entities": [], "relations": []})
+            file_anns['entities'].extend(new_entities)
+            total_annotations += len(new_entities)
+            annotated_files += 1
+
+        # ── Set up diplomatic layer ───────────────────────────────────
+        diplo_tags = {t for t in all_used_tags if t.lower() in DIPLOMATIC_TAGS}
+        other_tags = all_used_tags - diplo_tags
+        if diplo_tags:
+            if "Diplomatic" not in self.tag_hierarchy:
+                self.tag_hierarchy["Diplomatic"] = []
+            for t in sorted(diplo_tags):
+                if t not in self.entity_tags:
+                    self.tag_hierarchy["Diplomatic"].append(t)
+        if other_tags:
+            if "Imported Tags" not in self.tag_hierarchy:
+                self.tag_hierarchy["Imported Tags"] = []
+            for t in sorted(other_tags):
+                if t not in self.entity_tags:
+                    self.tag_hierarchy["Imported Tags"].append(t)
+        for t in all_used_tags:
+            self.tag_active_states.setdefault(t, True)
+            self.tag_propagation_states.setdefault(t, True)
+            self.tag_visible_states.setdefault(t, True)
+        self._sync_flat_tags()
+        self._ensure_default_colors()
+        self._update_entity_tag_combobox()
+        self._configure_text_tags()
+
+        # Refresh UI if current file was annotated
+        if self.current_file_path in self.annotations:
+            self._build_entity_lookup_map(
+                self.annotations[self.current_file_path]['entities'])
+            self.update_entities_list()
+            self.apply_annotations_to_text()
+
+        self._update_button_states()
+        msg = (f"Annotated {annotated_files} file(s) with "
+               f"{total_annotations} diplomatic annotation(s).")
+        messagebox.showinfo("Import Complete", msg, parent=self.root)
+        self.status_var.set(msg)
 
     def _parse_conll_into_documents(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as f: content = f.read()
@@ -162,8 +390,9 @@ class ImportMixin:
     def _parse_cei_xml_into_documents(self, file_path):
         """
         Processes CEI XML file into documents.
-        Extracts text from cei:tenor and automatically annotates
-        diplomatic elements (place names, dates, etc.).
+        Extracts text and automatically annotates:
+          - place names (LOC), dates (DAT)
+          - diplomatic parts (Protocol / Tenor / Eschatocol macros + sub-parts)
         """
         # Register CEI namespace
         ET.register_namespace('cei', 'http://www.monasterium.net/NS/cei')
@@ -178,52 +407,60 @@ class ImportMixin:
             root = tree.getroot()
 
             # Find cei:text element
-            text_elem = root.find('.//{http://www.monasterium.net/NS/cei}text')
+            ns_uri = 'http://www.monasterium.net/NS/cei'
+            text_elem = root.find(f'.//{{{ns_uri}}}text')
             if text_elem is None:
                 messagebox.showwarning("XML Error", f"No cei:text element found in {file_path}")
                 return documents, all_tags
 
-            # Extract text from cei:tenor
-            tenor_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}tenor')
-            abstract_elem = text_elem.find('.//{http://www.monasterium.net/NS/cei}abstract')
-
-            # Extract and process text
+            ns = {'cei': ns_uri}
             full_text = ""
             annotations = []
 
-            if tenor_elem is not None:
-                tenor_text = self._extract_text_from_cei_element(tenor_elem)
-                if tenor_text.strip():
-                    full_text = tenor_text
-            elif abstract_elem is not None:
-                abstract_text = self._extract_text_from_cei_element(abstract_elem)
-                if abstract_text.strip():
-                    full_text = abstract_text
+            # ── Check whether this XML has diplomatic sub-parts ──────────────
+            has_diplomatic = any(
+                text_elem.findall(f'.//cei:{tag}', ns)
+                for tag in ('invocatio', 'intitulatio', 'narratio',
+                            'dispositio', 'sanctio', 'corroboratio',
+                            'apprecatio', 'eschatocol',
+                            'authenticationFormula', 'datatio', 'abstract')
+            )
+
+            if has_diplomatic:
+                # Extract text from the FULL cei:text so that protocol / tenor
+                # / eschatocol are all included.
+                full_text = self._extract_text_from_cei_element(text_elem)
+                if full_text.strip():
+                    diplo_annotations, diplo_tags = \
+                        self._detect_and_annotate_diplomatic(text_elem, full_text)
+                    annotations.extend(diplo_annotations)
+                    all_tags.update(diplo_tags)
             else:
-                # If no tenor or abstract, try to collect all text
-                full_text = self._extract_all_text(text_elem)
+                # Original behaviour: extract from tenor / abstract only
+                tenor_elem = text_elem.find(f'.//{{{ns_uri}}}tenor')
+                abstract_elem = text_elem.find(f'.//{{{ns_uri}}}abstract')
+                if tenor_elem is not None:
+                    full_text = self._extract_text_from_cei_element(tenor_elem)
+                elif abstract_elem is not None:
+                    full_text = self._extract_text_from_cei_element(abstract_elem)
+                else:
+                    full_text = self._extract_all_text(text_elem)
 
             if not full_text.strip():
                 messagebox.showinfo("Info", f"No text content found in {file_path}")
                 return documents, []
 
-            # CEI XML import: we extract the text, and automatic annotation
-            # only works if placeName/dateRange text exactly matches
-            # the text in the document.
-            # Currently we only extract the text; annotations are added
-            # later manually or via AI-based prediction.
-
-            # Extract place names (LOC tag) - for informational purposes
+            # ── Annotate place names (LOC) ───────────────────────────────────
             place_names = []
-            for place_elem in text_elem.findall('.//{http://www.monasterium.net/NS/cei}placeName'):
+            for place_elem in text_elem.findall(f'.//{{{ns_uri}}}placeName'):
                 place_text = self._get_element_text(place_elem)
                 if place_text.strip():
                     place_names.append(place_text.strip())
                     all_tags.add('LOC')
 
-            # Extract dates (DAT/TIM tag) - for informational purposes
+            # ── Annotate dates (DAT) ─────────────────────────────────────────
             date_ranges = []
-            for date_elem in text_elem.findall('.//{http://www.monasterium.net/NS/cei}dateRange'):
+            for date_elem in text_elem.findall(f'.//{{{ns_uri}}}dateRange'):
                 date_text = self._get_element_text(date_elem)
                 if date_text.strip():
                     date_ranges.append(date_text.strip())
@@ -233,28 +470,13 @@ class ImportMixin:
             atom_id_elem = root.find('.//{http://www.w3.org/2005/Atom}id')
             doc_id = atom_id_elem.text if atom_id_elem is not None else os.path.basename(file_path)
 
-            # Attempt automatic annotation
-            line_starts = [0]
-            for i, char in enumerate(full_text):
-                if char == '\n': line_starts.append(i + 1)
-            line_starts.append(len(full_text) + 1)
-
-            def offset_to_tkinter_index(offset):
-                line_idx = bisect_right(line_starts, offset) - 1
-                line = line_idx + 1
-                char = offset - line_starts[line_idx]
-                return f"{line}.{char}"
-
             # Annotate place names (only if place_name is found exactly in the text)
             for place_name in place_names:
-                # Find the place_name in the text
                 idx = full_text.find(place_name)
                 if idx != -1:
-                    start_pos = idx
-                    end_pos = idx + len(place_name)
                     annotations.append({
-                        'start': start_pos,
-                        'end': end_pos,
+                        'start': idx,
+                        'end': idx + len(place_name),
                         'tag': 'LOC'
                     })
 
@@ -262,11 +484,9 @@ class ImportMixin:
             for date_text in date_ranges:
                 idx = full_text.find(date_text)
                 if idx != -1:
-                    start_pos = idx
-                    end_pos = idx + len(date_text)
                     annotations.append({
-                        'start': start_pos,
-                        'end': end_pos,
+                        'start': idx,
+                        'end': idx + len(date_text),
                         'tag': 'DAT'
                     })
 
@@ -809,6 +1029,11 @@ class ImportMixin:
         For each part, we try to match the XML file's base_name to a session
         file and, if found, search the part text in the file content and
         create an annotation entry.
+
+        When parts are sub-parts of a macro (e.g. invocatio → Protocol),
+        a macro-span annotation is additionally created that covers from
+        the first sub-part start to the last sub-part end.
+
         Returns the total number of annotations created.
         """
         import uuid
@@ -826,6 +1051,23 @@ class ImportMixin:
         used_tags = set()
         # Group annotations per file path
         file_annotations_map = {}  # file_path → list of annotation dicts
+
+        # Track macro membership: for each session_path, map macro_key →
+        # list of (start_char, end_char, tag_name)
+        macro_sub_parts = {}  # session_path → {macro_key: [(start, end, tag)]}
+
+        # Map human-readable labels back to CEI local tag names
+        # The labels from _discover_diplomatic_parts are the same as the
+        # CEI local names for sub-parts (e.g. "invocatio", "intitulatio").
+        LABEL_TO_CEI_TAG = {
+            'invocatio': 'invocatio', 'intitulatio': 'intitulatio',
+            'inscriptio': 'inscriptio', 'arenga': 'arenga',
+            'narratio': 'narratio', 'dispositio': 'dispositio',
+            'sanctio': 'sanctio', 'corroboratio': 'corroboratio',
+            'apprecatio': 'apprecatio',
+            'authentication formula': 'authenticationFormula',
+            'datation': 'datatio',
+        }
 
         for fname, fpath, label, text, xml_stem in selected_parts:
             # Find matching session file
@@ -862,19 +1104,13 @@ class ImportMixin:
                 match_pos = norm_content.find(norm_part)
                 if match_pos == -1:
                     continue  # text not found — skip
-                # We found the position in normalized text, but we need the
-                # offset in the original content.  Approximate by finding
-                # the norm_part substring that bridges whitespace differences.
-                # Fallback: search for the first 40 chars (uncommon enough
-                # to be unique, common enough to survive normalization).
+                # Fallback: search for the first 40 chars
                 short_prefix = normalize(part_text[:40])
                 match_pos = normalize(content).find(short_prefix)
                 if match_pos == -1:
                     continue
 
-                # Now that we have a position in normalized content, recover
-                # original offset by scanning forward until the char matches
-                # content char by char
+                # Recover original offset
                 raw_pos = 0
                 norm_idx = 0
                 while norm_idx < match_pos and raw_pos < len(content):
@@ -894,7 +1130,6 @@ class ImportMixin:
             line_starts.append(len(content) + 1)
 
             end_pos = match_pos + len(part_text)
-            # Clamp to content length
             end_pos = min(end_pos, len(content))
 
             start_str = self._char_offset_to_tkinter_index_from_offsets(
@@ -919,6 +1154,63 @@ class ImportMixin:
                 'propagated': False,
             }
             file_annotations_map.setdefault(session_path, []).append(annotation)
+
+            # ── Track macro membership for this part ────────────────
+            cei_tag = LABEL_TO_CEI_TAG.get(label)
+            if cei_tag:
+                macro_key = MEMBER_OF_MACRO.get(cei_tag)
+                if macro_key:
+                    macro_sub_parts.setdefault(
+                        session_path, {}).setdefault(
+                            macro_key, []).append((match_pos, end_pos, tag_name))
+
+        # ── Create macro-span annotations ──────────────────────────────
+        for sess_path, macro_dict in macro_sub_parts.items():
+            for macro_key, spans in macro_dict.items():
+                if len(spans) < 1:
+                    continue
+                spans.sort()
+                m_start = spans[0][0]
+                m_end = max(s[1] for s in spans)
+                macro_tag = DIPLOMATIC_MACRO_PARTS[macro_key]["label"].lower()
+                used_tags.add(macro_tag)
+
+                content = None  # need content for text extraction
+                try:
+                    with open(sess_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except Exception:
+                    continue
+
+                line_starts = [0]
+                for i, ch in enumerate(content):
+                    if ch == '\n':
+                        line_starts.append(i + 1)
+                line_starts.append(len(content) + 1)
+
+                m_start_str = self._char_offset_to_tkinter_index_from_offsets(
+                    line_starts, m_start)
+                m_end_str = self._char_offset_to_tkinter_index_from_offsets(
+                    line_starts, m_end)
+
+                try:
+                    ml, mc = map(int, m_start_str.split('.'))
+                    el, ec = map(int, m_end_str.split('.'))
+                except ValueError:
+                    continue
+
+                macro_annotation = {
+                    'id': uuid.uuid4().hex,
+                    'start_line': ml,
+                    'start_char': mc,
+                    'end_line': el,
+                    'end_char': ec,
+                    'text': content[m_start:m_end],
+                    'tag': macro_tag,
+                    'propagated': False,
+                }
+                file_annotations_map.setdefault(sess_path, []).append(
+                    macro_annotation)
 
         if not file_annotations_map:
             messagebox.showinfo("No Matches",
@@ -955,6 +1247,128 @@ class ImportMixin:
 
         self._update_button_states()
         return total_annotations
+
+    # ── Diplomatic-part auto-detection (used during import and export) ──────
+
+    def _detect_and_annotate_diplomatic(self, text_elem, full_text):
+        """Scan *text_elem* for diplomatic sub-parts, annotate both the
+        macro wrappers (Protocol / Tenor / Eschatocol) and the sub-parts
+        themselves.
+
+        Returns (annotations, all_tags) where each annotation dict has
+        'start' / 'end' (character offsets into *full_text*) and 'tag'.
+        Macro annotations span from their first sub-part start to their
+        last sub-part end; consecutive macros fill the full text.
+        """
+        ns_uri = 'http://www.monasterium.net/NS/cei'
+
+        # ── discover all sub-part elements + their text ────────────────
+        # We need the XML elements to figure out macro membership.
+        # We store (local_tag, extracted_text, start_in_full, end_in_full).
+        sub_part_spans = []  # (local_tag, label, start, end)
+
+        # Map every CEI local name → a user-facing label
+        part_labels = {
+            'invocatio': 'invocatio',
+            'intitulatio': 'intitulatio',
+            'inscriptio': 'inscriptio',
+            'arenga': 'arenga',
+            'narratio': 'narratio',
+            'dispositio': 'dispositio',
+            'sanctio': 'sanctio',
+            'corroboratio': 'corroboratio',
+            'apprecatio': 'apprecatio',
+            'authenticationFormula': 'authentication formula',
+            'datatio': 'datation',
+            'abstract': 'abstract',
+            'publicatio': 'publicatio / promulgatio',
+            'promulgatio': 'publicatio / promulgatio',
+            'textBody': 'text body',
+        }
+
+        for local_tag, _label in part_labels.items():
+            for elem in text_elem.findall(f'.//{{{ns_uri}}}{local_tag}'):
+                part_text = self._extract_text_from_cei_element(elem)
+                if not part_text.strip():
+                    continue
+                # Find position in full_text
+                idx = full_text.find(part_text)
+                if idx == -1:
+                    # Try normalised match
+                    def norm(s): return ' '.join(s.split())
+                    npart = norm(part_text)
+                    nfull = norm(full_text)
+                    nidx = nfull.find(npart)
+                    if nidx == -1:
+                        continue
+                    # Recover original position
+                    raw = 0
+                    ni = 0
+                    while ni < nidx and raw < len(full_text):
+                        if full_text[raw].isspace():
+                            raw += 1
+                        else:
+                            ni += 1
+                            raw += 1
+                    idx = raw
+                sub_part_spans.append((local_tag, _label, idx, idx + len(part_text)))
+
+        if not sub_part_spans:
+            return [], set()
+
+        # Sort by start offset
+        sub_part_spans.sort(key=lambda t: t[2])
+
+        annotations = []
+        used_tags = set()
+
+        # ── Group by macro and produce annotations ────────────────────
+        # Macro order: protocol, tenor, eschatocol (by DIPLOMATIC_MACRO_PARTS order)
+        macro_keys_in_order = list(DIPLOMATIC_MACRO_PARTS.keys())
+
+        # Build per-macro spans
+        macro_ranges = {k: [] for k in macro_keys_in_order}  # macro_key → [(start, end)]
+        # Also track abstract/publicatio as standalone
+        standalone = []  # (start, end, tag)
+
+        for local_tag, label, start, end in sub_part_spans:
+            tag_name = self._diplomatic_label_to_tag(label)
+            used_tags.add(tag_name)
+            # Sub-part annotation
+            annotations.append({'start': start, 'end': end, 'tag': tag_name})
+            macro_key = MEMBER_OF_MACRO.get(local_tag)
+            if macro_key:
+                macro_ranges[macro_key].append((start, end))
+            else:
+                standalone.append((start, end, tag_name))
+
+        for macro_key in macro_keys_in_order:
+            spans = macro_ranges[macro_key]
+            if not spans:
+                continue
+            spans.sort()
+            m_start = spans[0][0]
+            m_end = max(s[1] for s in spans)
+            macro_tag = DIPLOMATIC_MACRO_PARTS[macro_key]["label"].lower()
+            used_tags.add(macro_tag)
+            annotations.append({'start': m_start, 'end': m_end, 'tag': macro_tag})
+
+        # Standalone parts (abstract, publicatio, textBody)
+        for start, end, tag_name in standalone:
+            used_tags.add(tag_name)
+            annotations.append({'start': start, 'end': end, 'tag': tag_name})
+
+        # Merge overlapping / adjacent annotations of the SAME tag
+        annotations.sort(key=lambda a: (a['start'], a['end']))
+        merged = []
+        for a in annotations:
+            if merged and a['tag'] == merged[-1]['tag'] and a['start'] <= merged[-1]['end']:
+                merged[-1]['end'] = max(merged[-1]['end'], a['end'])
+            else:
+                merged.append(dict(a))
+        annotations = merged
+
+        return annotations, used_tags
 
     def _discover_diplomatic_parts(self, root, ns, xml_path):
         """Discover diplomatic parts in a CEI XML file.
