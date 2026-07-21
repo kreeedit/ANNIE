@@ -165,10 +165,19 @@ class PropagationMixin:
             # the search text ends with punctuation, parentheses, or other
             # non-alphanumeric characters (e.g. "Ego Iohannes notarius
             # interfui. (S)").
+            #
+            # Multi-word formulae use \s+ between tokens so that line breaks,
+            # tabs, or multiple spaces in the target text do not prevent a
+            # match (e.g. vocabulary "iussu predicti iudicis" matches
+            # "iussu\npredicti iudicis" in the file).
             pattern = ''
             if text and text[0].isalnum():
                 pattern += r'\b'
-            pattern += re.escape(text)
+            tokens = text.split()
+            if len(tokens) == 1:
+                pattern += re.escape(text)
+            else:
+                pattern += r'\s+'.join(re.escape(t) for t in tokens)
             if text and text[-1].isalnum():
                 pattern += r'\b'
             compiled_regexes.append((re.compile(pattern, re.IGNORECASE), tag, text))
@@ -184,7 +193,7 @@ class PropagationMixin:
 
             for regex, tag, matched_text_original in compiled_regexes:
                 for match in regex.finditer(content):
-                    matched_text = match.group()
+                    matched_text = re.sub(r'\s+', ' ', match.group()).strip()
                     start_index, end_index = match.span()
                     start_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, start_index)
                     end_pos = self._char_offset_to_tkinter_index_from_offsets(line_starts, end_index)
