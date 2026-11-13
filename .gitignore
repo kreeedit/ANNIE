@@ -1,3 +1,12 @@
+# Hidden files and directories — nothing dot-prefixed is versioned
+.*
+!.gitignore
+
+# Markdown — allowlist: only the public docs are versioned
+*.md
+!README.md
+!ANNIE_User_Guide.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -10,15 +19,8 @@ dist/
 test_annie.py
 
 # Virtual environments
-.venv/
 venv/
 env/
 
-# Local secrets / environment
-.env
-
 # Editor / OS
-.vscode/
-.idea/
 *.swp
-.DS_Store
