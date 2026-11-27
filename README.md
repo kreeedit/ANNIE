@@ -150,7 +150,7 @@ Annotations are stored in standard JSON format:
 
 ### APA Style
 
-Kovács, T. (2026). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 1.14) [Computer software]. GitHub. [https://github.com/kreeedit/ANNIE](https://github.com/kreeedit/ANNIE)
+Kovács, T. (2026). *ANNIE: Annotation Interface for Named-entity & Information Extraction* (Version 1.15) [Computer software]. GitHub. [https://github.com/kreeedit/ANNIE](https://github.com/kreeedit/ANNIE)
 
 ### BibTeX
 
@@ -158,10 +158,10 @@ Kovács, T. (2026). *ANNIE: Annotation Interface for Named-entity & Information 
 @software{Kovacs_ANNIE_2026,
   author = {Kovács, Tamás},
   title = {{ANNIE: Annotation Interface for Named-entity & Information Extraction}},
-  version = {1.14},
+  version = {1.15},
   publisher = {Zenodo},
   year = {2026},
-  doi = {10.5281/zenodo.15805548},
+  doi = {10.5281/zenodo.24582846},
   url = {https://github.com/kreeedit/ANNIE}
 }
 ```

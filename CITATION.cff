@@ -6,8 +6,15 @@ authors:
     orcid: "https://orcid.org/0000-0002-3913-2946"
 title: "ANNIE: Annotation Interface for Named-entity & Information Extraction"
 version: "1.15"
-doi: 10.5281/zenodo.15805548
+doi: 10.5281/zenodo.15805547
 date-released: 2026-11-27
 url: "https://github.com/kreeedit/ANNIE"
 license: Apache-2.0
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.15805547
+    description: "Concept DOI: all versions, resolves to the latest release"
+  - type: doi
+    value: 10.5281/zenodo.24582846
+    description: "Version DOI for v1.15 (2026-11-27)"
 repository-code: "https://github.com/kreeedit/ANNIE"
