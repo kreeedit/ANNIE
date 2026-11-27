@@ -9,3 +9,5 @@ version: 0.75
 doi: 10.5281/zenodo.15805548
 date-released: 2025-07-04
 url: "https://github.com/kreeedit/ANNIE"
+license: Apache-2.0
+repository-code: "https://github.com/kreeedit/ANNIE"
